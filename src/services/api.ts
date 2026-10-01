@@ -11,7 +11,7 @@ export async function getModels(): Promise<Model[]> {
   return response.json();
 }
 export async function getPayments(): Promise<Payment[]> {
-  const response = await fetch(`${API_URL}؟action=payments`);
+  const response = await fetch(`${API_URL}?action=payments`);
 
   if (!response.ok) throw new Error(`Failed to fetch payments`);
 
