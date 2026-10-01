@@ -9,6 +9,15 @@ export interface Model {
   totalFabricCm: number;
 }
 
+export interface NewModelData {
+  date: string;
+  modelName: string;
+  quantity: number;
+  pricePerPiece: number;
+  fabricCm: number;
+}
+
+
 export interface Payment {
   id: string;
   date: string;
