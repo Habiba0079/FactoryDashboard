@@ -1,0 +1,2162 @@
+From 9f690b40acc700bf0f4e27e23f62035b01893ba4 Mon Sep 17 00:00:00 2001
+From: Habiba <dev@example.com>
+Date: Thu, 1 Oct 2026 21:48:20 +0000
+Subject: [PATCH] feat: navigation, full CRUD, validation, RTL UI and PWA
+
+- tab navigation (dashboard / models / payments)
+- add/edit/delete for models and payments with confirm dialog
+- form validation with inline errors
+- mobile-first Arabic RTL styling
+- PWA manifest, service worker, icons
+- API: writes via POST (text/plain), token support
+- apps-script/Code.gs backend with doPost + id-based update/delete
+- add .env.example
+---
+ .env.example                       |   3 +
+ .gitignore                         |   5 +-
+ apps-script/Code.gs                | 197 ++++++++++++++++++++++
+ index.html                         |   9 +-
+ public/icons/icon-192.png          | Bin 0 -> 783 bytes
+ public/icons/icon-512.png          | Bin 0 -> 2605 bytes
+ public/icons/icon-maskable-512.png | Bin 0 -> 2521 bytes
+ public/manifest.webmanifest        |  17 ++
+ public/sw.js                       |  48 ++++++
+ src/App.tsx                        |  82 ++++------
+ src/components/ConfirmDialog.tsx   |  35 ++++
+ src/components/Field.tsx           |  25 +++
+ src/components/Modal.tsx           |  35 ++++
+ src/components/ModelForm.tsx       | 140 +++++++++-------
+ src/components/PaymentForm.tsx     | 119 +++++++-------
+ src/index.css                      | 251 +++++++++++++++++++----------
+ src/main.tsx                       |  21 ++-
+ src/pages/Dashboard.tsx            | 115 +++++++------
+ src/pages/Models.tsx               | 228 ++++++++++++++++++++------
+ src/pages/Payments.tsx             | 189 ++++++++++++++++++++++
+ src/services/api.ts                | 124 +++++++-------
+ src/types/index.ts                 |  11 +-
+ src/utils/format.ts                |  27 ++++
+ src/utils/validation.ts            |  29 ++++
+ 24 files changed, 1280 insertions(+), 430 deletions(-)
+ create mode 100644 .env.example
+ create mode 100644 apps-script/Code.gs
+ create mode 100644 public/icons/icon-192.png
+ create mode 100644 public/icons/icon-512.png
+ create mode 100644 public/icons/icon-maskable-512.png
+ create mode 100644 public/manifest.webmanifest
+ create mode 100644 public/sw.js
+ create mode 100644 src/components/ConfirmDialog.tsx
+ create mode 100644 src/components/Field.tsx
+ create mode 100644 src/components/Modal.tsx
+ create mode 100644 src/utils/format.ts
+ create mode 100644 src/utils/validation.ts
+
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..05c2ac6
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,3 @@
++# انسخ الملف ده باسم .env وحط القيم الحقيقية (مايترفعش على GitHub)
++VITE_API_URL=
++VITE_API_TOKEN=
+diff --git a/.gitignore b/.gitignore
+index 3b0b403..de28197 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -23,4 +23,7 @@ dist-ssr
+ *.sln
+ *.sw?
+ 
+-.env
+\ No newline at end of file
++# Environment variables
++.env
++.env.*
++!.env.example
+diff --git a/apps-script/Code.gs b/apps-script/Code.gs
+new file mode 100644
+index 0000000..924c37a
+--- /dev/null
++++ b/apps-script/Code.gs
+@@ -0,0 +1,197 @@
++/**
++ * Factory Accounts — Google Apps Script backend
++ *
++ * القراءة : GET  ?action=models | payments | summary
++ * الكتابة : POST (JSON كنص) { action, token, ...data }
++ *           addModel / updateModel / deleteModel
++ *           addPayment / updatePayment / deletePayment
++ *
++ * إعداد الـ token: Project Settings → Script properties → API_TOKEN
++ * بعد أي تعديل: Deploy → Manage deployments → New version.
++ */
++
++const MODEL_HEADERS = ["id", "date", "modelName", "quantity", "pricePerPiece", "fabricCm", "totalPrice", "totalFabricCm"];
++const PAYMENT_HEADERS = ["id", "date", "amount", "notes"];
++
++// لو السكريبت مش مربوط بالشيت (standalone) استبدلها بـ SpreadsheetApp.openById("ID")
++function getSpreadsheet_() {
++  return SpreadsheetApp.getActiveSpreadsheet();
++}
++
++function json_(obj) {
++  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
++}
++
++// ---------------------------------------------------------------- GET
++function doGet(e) {
++  try {
++    const action = e.parameter.action;
++    if (action === "models") return json_(readRows_("Models", MODEL_HEADERS));
++    if (action === "payments") return json_(readRows_("Payments", PAYMENT_HEADERS));
++    if (action === "summary") return json_(getSummary_());
++    return json_({ success: false, message: "Unknown action" });
++  } catch (err) {
++    return json_({ success: false, message: String(err) });
++  }
++}
++
++// ---------------------------------------------------------------- POST
++function doPost(e) {
++  const lock = LockService.getScriptLock();
++  try {
++    lock.waitLock(10000);
++    const body = JSON.parse(e.postData.contents);
++
++    const expected = PropertiesService.getScriptProperties().getProperty("API_TOKEN");
++    if (expected && body.token !== expected) {
++      return json_({ success: false, message: "Unauthorized" });
++    }
++
++    switch (body.action) {
++      case "addModel": return json_({ success: true, data: addModel_(body) });
++      case "updateModel": return json_({ success: true, data: updateModel_(body) });
++      case "deleteModel": return json_({ success: true, data: deleteRow_("Models", body.id) });
++      case "addPayment": return json_({ success: true, data: addPayment_(body) });
++      case "updatePayment": return json_({ success: true, data: updatePayment_(body) });
++      case "deletePayment": return json_({ success: true, data: deleteRow_("Payments", body.id) });
++      default: return json_({ success: false, message: "Unknown action" });
++    }
++  } catch (err) {
++    return json_({ success: false, message: String(err) });
++  } finally {
++    lock.releaseLock();
++  }
++}
++
++// ---------------------------------------------------------------- Models
++function cleanModel_(d) {
++  const quantity = Number(d.quantity);
++  const pricePerPiece = Number(d.pricePerPiece);
++  const fabricCm = Number(d.fabricCm);
++  if (!d.date) throw new Error("التاريخ مطلوب");
++  if (!String(d.modelName || "").trim()) throw new Error("اسم الموديل مطلوب");
++  if (!(quantity > 0)) throw new Error("عدد القطع لازم يكون أكبر من 0");
++  if (!(pricePerPiece > 0)) throw new Error("سعر القطعة لازم يكون أكبر من 0");
++  if (!(fabricCm > 0)) throw new Error("المتراج لازم يكون أكبر من 0");
++  return {
++    date: String(d.date).slice(0, 10),
++    modelName: String(d.modelName).trim(),
++    quantity: quantity,
++    pricePerPiece: pricePerPiece,
++    fabricCm: fabricCm,
++    totalPrice: quantity * pricePerPiece,
++    totalFabricCm: quantity * fabricCm,
++  };
++}
++
++function addModel_(d) {
++  const model = Object.assign({ id: Utilities.getUuid() }, cleanModel_(d));
++  appendRow_("Models", MODEL_HEADERS, model);
++  return model;
++}
++
++function updateModel_(d) {
++  const model = Object.assign({ id: d.id }, cleanModel_(d));
++  replaceRow_("Models", MODEL_HEADERS, model);
++  return model;
++}
++
++// ---------------------------------------------------------------- Payments
++function cleanPayment_(d) {
++  const amount = Number(d.amount);
++  if (!d.date) throw new Error("التاريخ مطلوب");
++  if (!(amount > 0)) throw new Error("قيمة الدفعة لازم تكون أكبر من 0");
++  return { date: String(d.date).slice(0, 10), amount: amount, notes: String(d.notes || "").trim() };
++}
++
++function addPayment_(d) {
++  const payment = Object.assign({ id: Utilities.getUuid() }, cleanPayment_(d));
++  appendRow_("Payments", PAYMENT_HEADERS, payment);
++  return payment;
++}
++
++function updatePayment_(d) {
++  const payment = Object.assign({ id: d.id }, cleanPayment_(d));
++  replaceRow_("Payments", PAYMENT_HEADERS, payment);
++  return payment;
++}
++
++// ---------------------------------------------------------------- Summary
++function getSummary_() {
++  const models = readRows_("Models", MODEL_HEADERS);
++  const payments = readRows_("Payments", PAYMENT_HEADERS);
++  const sum = function (rows, key) {
++    return rows.reduce(function (t, r) { return t + Number(r[key] || 0); }, 0);
++  };
++  const totalWork = sum(models, "totalPrice");
++  const totalPayments = sum(payments, "amount");
++  return {
++    totalWork: totalWork,
++    totalPayments: totalPayments,
++    balance: totalWork - totalPayments,
++    totalPieces: sum(models, "quantity"),
++    totalFabricCm: sum(models, "totalFabricCm"),
++  };
++}
++
++// ---------------------------------------------------------------- Sheet helpers
++function sheet_(name) {
++  const s = getSpreadsheet_().getSheetByName(name);
++  if (!s) throw new Error("Sheet not found: " + name);
++  return s;
++}
++
++function normalize_(value) {
++  if (value instanceof Date) {
++    return Utilities.formatDate(value, Session.getScriptTimeZone(), "yyyy-MM-dd");
++  }
++  return value;
++}
++
++function readRows_(name, headers) {
++  const s = sheet_(name);
++  const last = s.getLastRow();
++  if (last < 2) return [];
++  const values = s.getRange(2, 1, last - 1, headers.length).getValues();
++  return values
++    .filter(function (row) { return row[0] !== ""; })
++    .map(function (row) {
++      const obj = {};
++      headers.forEach(function (h, i) { obj[h] = normalize_(row[i]); });
++      return obj;
++    });
++}
++
++function toRow_(headers, obj) {
++  return headers.map(function (h) { return obj[h] === undefined ? "" : obj[h]; });
++}
++
++function appendRow_(name, headers, obj) {
++  sheet_(name).appendRow(toRow_(headers, obj));
++}
++
++// بندوّر على الصف بالـ id (مش برقم الصف) عشان الحذف مايبوظش الترتيب
++function findRow_(s, id) {
++  const last = s.getLastRow();
++  if (last < 2 || !id) return -1;
++  const ids = s.getRange(2, 1, last - 1, 1).getValues();
++  for (let i = 0; i < ids.length; i++) {
++    if (String(ids[i][0]) === String(id)) return i + 2;
++  }
++  return -1;
++}
++
++function replaceRow_(name, headers, obj) {
++  const s = sheet_(name);
++  const row = findRow_(s, obj.id);
++  if (row === -1) throw new Error("السجل غير موجود");
++  s.getRange(row, 1, 1, headers.length).setValues([toRow_(headers, obj)]);
++}
++
++function deleteRow_(name, id) {
++  const s = sheet_(name);
++  const row = findRow_(s, id);
++  if (row === -1) throw new Error("السجل غير موجود");
++  s.deleteRow(row);
++  return { id: id };
++}
+diff --git a/index.html b/index.html
+index 31b7193..9f0d4b3 100644
+--- a/index.html
++++ b/index.html
+@@ -1,10 +1,13 @@
+ <!doctype html>
+-<html lang="en">
++<html lang="ar" dir="rtl">
+   <head>
+     <meta charset="UTF-8" />
+     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+-    <title>factorydashboard</title>
++    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
++    <meta name="theme-color" content="#0f766e" />
++    <link rel="manifest" href="/manifest.webmanifest" />
++    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
++    <title>حسابات المصنع</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/public/icons/icon-192.png b/public/icons/icon-192.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..bb508469022b78d0f9fd6f0b9e6cf7298b39e805
+GIT binary patch
+literal 783
+zcmeAS@N?(olHy`uVBq!ia0vp^2SAvE4M+yv$zf+;V7lh%;uumf=j~m?yvGJ24vv;L
+z?o|gZ|2$7IHE))*MQFp8*%KzcFfV49$vR)-@Q3S9tM=QPbyQhaF&3yWPEcdG#NsfE
+z!9$oKlS#psVF_o0$>0;*V(+fsP+PlaFaPdq_v_amUROHh^w+v-nY|p}42wS3Z!hAI
+zYg9_h{de>FJYNRJ>YNLq$^zv0r?^o~@~`^GsqX!AW(p@XNeT<u-Mcq^?w*1)CW)MH
+zYN7`tm?SdRpVe$CBs0uxk0z{{7%arIAS?18i-fJx5r$RMmNL)S8R&XpLk>fAPJp1z
+z{#51$K{Aa;iM(jD2HRsZ{=ZLuV;c3h=XF%+nm?Nu4{&(18+=~(`EvI8eZun!V^`n%
+zyFK@|-u2&a3%@AUz3$2HkhBG>u6$fy*~Rc+`LsHgru#w+nak_Fms}TF`~J**(K(1z
+j@`ul1mM~3H%ohJ!cY>?_Pn28%Oy~@ru6{1-oD!M<yxIYU
+
+literal 0
+HcmV?d00001
+
+diff --git a/public/icons/icon-512.png b/public/icons/icon-512.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..c655b9603a523918e87c724e837ba3d14a6fc708
+GIT binary patch
+literal 2605
+zcmeAS@N?(olHy`uVBq!ia0y~yU;;9k7&zE~)R&4YzZe)ezj(ShhE&XXd&kjF+EKva
+zqGA%idaLZ5gWmVAm@9CzpX53s*mA-4?|o~>s}W_j%#WVEd-*VxnIWjIM~;EvM;*|>
+zCKd(;7ET5R4j~2x0Tl)Y1rG)WhY1V}4GN454347;M#EvKq=yS{UobL!ds1T2C-?C3
+zyZQ3&{Rdp~-p!MXbK_?;*la8R_d5sUHeUvYn60-y?pI;C^@o??fc%=8KihNv{@vln
+zz_4d=k&Jfrr)j{9;rmwO+P9}ZK(#C64!^pW%Ea(M+<k%&Bg27hxlAkEAR%(2=6CH=
+z%My;^op-h`W@lJuE!(%){l}Ky&yQbJW~f(SNN}pQ`!zl8y8x4c{C=i}lWU6p=+EUl
+zuKK;nR+zzH;?@2quYMn#$H6ee<*7y3x0ain3^N=+LE0+G$sn<&if488VI39*o+lhk
+zi#Zq)Bp6v9LqgG@BY%JTJmwz7;av{h?UQTxIfoAzm^HWlet!HykfF?xVMFfief|HI
+zUbk&wI8a*0dcf%T|4T0mVv6(|)+;eQ3bUWI`aS!HNG63fpj66K)56fPO7`fjeGK)=
+z3{9(!Z`fsipqj;@N15ZmHco~l7J&mZ!DYC>qucLiK4(w>2B_yy$;bm&`zU@t-@n*>
+z#vz^aiPJ3IW<Rw&V{|-Yo^v}SD1+DkzWHr_?!5PAxBqQE`}yvx-`63@*7548`K9k8
+zpZ~g_cDMT4&VSoMMTWwvZ)x*u@85j>J8ScM>)$o;Yq#mA1EcTLviqm!RnPn!|2Fmf
+z-ZMYfYk`WKj_AK<_iz9E&FsDV+uZ$o&;AZv{r-5VdAUEo{^IrozU7Atzi`B-wep*-
+zKOVD3ZjBqmhhy{XUxfWh_*`}7=<9=8pi2CwG@+6Rl<xX(ey&$!zV>`S@4NQ-B&7(b
+pYZw^zO(#v`Xd{A}jfgs?e~-3*u~)C$0c-{`c)I$ztaD0e0ssjS?9>1N
+
+literal 0
+HcmV?d00001
+
+diff --git a/public/icons/icon-maskable-512.png b/public/icons/icon-maskable-512.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..7e194fafeff229e47313613656f5ec311f18dc7a
+GIT binary patch
+literal 2521
+zcmeAS@N?(olHy`uVBq!ia0y~yU;;9k7&zE~)R&4YzZe)e7kIijhE&XXd)GGTj)R2j
+z#e=SV+O0g-98UP%Wb8X2vhAR~!}sOY=a?>NvtABgJnPY$N6%h;WMNoR6K%`D@S_T7
+zU=s@i0}Ceu1BVa;gMbPHgMtSGgTn*{h6V*j1_sAb1*73GnjQp7_Ej+)NUzwjJKpx;
+z&8Kg_zT*5ad2{#d)yJ<YGuWN-WB;G+)G)V#l|km%x%U4rxBRz@VqqxY2<E%4X>Do8
+z$k1c{Hel|y>B&M22Qq^BFR$Ef$p^_?64}3kzkK<7Ms2X?JF9qGh9Bnq<=<DU+w9)6
+zH_n#vhc^>L+s&5`>OXDq<TxM`$9O=&TJE3z+kN~$92pJ>fc?JEkKq8rWxlJK)eAis
+z4m?{Xw=B5axfN2jNYDN!Vq0r3Gjp&PH7{zuGW?j^zWeu8;d!z5;?~b&_^^<L;Wo_c
+z4DJs_8KQ4~{7|3yy_TWgi(x~rX8Y?Ya~bjl8FCVDEwswjKakDT@D%KM<~e@A5_J*_
+zgST&e*Svl5FNSNOdmw1~_Uo(F|4cuB@BP0ue}B)<{Z*GH46b1!@?HgB2!C5v|82)P
+z_u0E<KNbLmQ~Sg4_oemUcHR3w3!G7Ml25fiS~d6G`FYp>MhBM_)i5=zee>_(j;i~w
+zUhhx;y6@`s`t$F8XISpuv9l`1mZ|RP!*_LGThguT3U=G)7uP??1=U=8n6Ol1z@*%e
+zeDme<@B))MzZ34CcnQ^if2<Q2I0!2ntw%?j3+QE8E&IK=&TDgi$GQWXYz&^RelF{r
+G5}E*rth3<&
+
+literal 0
+HcmV?d00001
+
+diff --git a/public/manifest.webmanifest b/public/manifest.webmanifest
+new file mode 100644
+index 0000000..ea52966
+--- /dev/null
++++ b/public/manifest.webmanifest
+@@ -0,0 +1,17 @@
++{
++  "name": "حسابات المصنع",
++  "short_name": "حسابات",
++  "description": "تنظيم الحساب بين المصنع والتاجر",
++  "lang": "ar",
++  "dir": "rtl",
++  "start_url": "/",
++  "scope": "/",
++  "display": "standalone",
++  "background_color": "#f4f6f5",
++  "theme_color": "#0f766e",
++  "icons": [
++    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
++    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
++    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
++  ]
++}
+diff --git a/public/sw.js b/public/sw.js
+new file mode 100644
+index 0000000..8085786
+--- /dev/null
++++ b/public/sw.js
+@@ -0,0 +1,48 @@
++// Service worker بسيط: بيخزّن الـ app shell بس.
++// طلبات الـ API (script.google.com) بتروح للشبكة دايمًا ومابتتخزنش،
++// عشان الحسابات تفضل دقيقة. مفيش offline للبيانات في الإصدار ده.
++const CACHE = "factory-accounts-v1";
++const SHELL = ["/", "/manifest.webmanifest", "/favicon.svg", "/icons/icon-192.png", "/icons/icon-512.png"];
++
++self.addEventListener("install", (event) => {
++  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)));
++  self.skipWaiting();
++});
++
++self.addEventListener("activate", (event) => {
++  event.waitUntil(
++    caches
++      .keys()
++      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
++      .then(() => self.clients.claim())
++  );
++});
++
++self.addEventListener("fetch", (event) => {
++  const { request } = event;
++  const url = new URL(request.url);
++
++  if (request.method !== "GET" || url.origin !== self.location.origin) return;
++
++  // الصفحات: الشبكة الأول، ولو مفيش نت نرجع للنسخة المخزنة
++  if (request.mode === "navigate") {
++    event.respondWith(fetch(request).catch(() => caches.match("/")));
++    return;
++  }
++
++  // الملفات الثابتة: من الكاش الأول وبنحدّثه في الخلفية
++  event.respondWith(
++    caches.match(request).then((cached) => {
++      const network = fetch(request)
++        .then((response) => {
++          if (response.ok) {
++            const copy = response.clone();
++            caches.open(CACHE).then((cache) => cache.put(request, copy));
++          }
++          return response;
++        })
++        .catch(() => cached);
++      return cached || network;
++    })
++  );
++});
+diff --git a/src/App.tsx b/src/App.tsx
+index 46790f6..1d839b6 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -1,58 +1,42 @@
+-import { useEffect, useState } from "react";
+-import { getSummary } from "./services/api";
+-import type { Summary } from "./services/api";
+-import ModelForm from "./components/ModelForm";
+-import Models from "./pages/Models";
+-import PaymentForm from "./components/PaymentForm";
++import { useState } from "react";
+ import Dashboard from "./pages/Dashboard";
++import Models from "./pages/Models";
++import Payments from "./pages/Payments";
+ 
+-function App() {
+-  const [summary, setSummary] = useState<Summary | null>(null);
+-  const [loading, setLoading] = useState(true);
+-  const [error, setError] = useState("");
+-
+-  useEffect(() => {
+-    async function loadSummary() {
+-      try {
+-        const data = await getSummary();
+-        setSummary(data);
+-      } catch (error) {
+-        setError("حدث خطأ أثناء تحميل البيانات");
+-        console.error(error);
+-      } finally {
+-        setLoading(false);
+-      }
+-    }
+-
+-    loadSummary();
+-  }, []);
++type Tab = "dashboard" | "models" | "payments";
+ 
+-  if (loading) {
+-    return <h1>Loading...</h1>;
+-  }
++const TABS: { id: Tab; label: string }[] = [
++  { id: "dashboard", label: "الحساب" },
++  { id: "models", label: "الموديلات" },
++  { id: "payments", label: "الدفعات" },
++];
+ 
+-  if (error) {
+-    return <h1>{error}</h1>;
+-  }
++function App() {
++  const [tab, setTab] = useState<Tab>("dashboard");
+ 
++  // بنعرض الصفحة النشطة بس، فكل مرة تفتحها بتتحمّل بيانات جديدة
+   return (
+-    <div>
+-      <h1>Factory Accounts</h1>
+-
+-      {summary && (
+-        <div>
+-          <p>Total Work: {summary.totalWork}</p>
+-          <p>Total Payments: {summary.totalPayments}</p>
+-          <p>Balance: {summary.balance}</p>
+-          <p>Total Pieces: {summary.totalPieces}</p>
+-          <p>Total Fabric: {summary.totalFabricCm} cm</p>
+-        </div>
+-      )}
+-
+-      <ModelForm />
+-      <Models />
+-      <PaymentForm />
+-      <Dashboard />
++    <div className="app">
++      <header className="app-header">Factory Accounts</header>
++
++      <main className="app-main">
++        {tab === "dashboard" && <Dashboard />}
++        {tab === "models" && <Models />}
++        {tab === "payments" && <Payments />}
++      </main>
++
++      <nav className="tabbar" aria-label="التنقل">
++        {TABS.map(({ id, label }) => (
++          <button
++            key={id}
++            className={tab === id ? "tab active" : "tab"}
++            aria-current={tab === id ? "page" : undefined}
++            onClick={() => setTab(id)}
++          >
++            {label}
++          </button>
++        ))}
++      </nav>
+     </div>
+   );
+ }
+diff --git a/src/components/ConfirmDialog.tsx b/src/components/ConfirmDialog.tsx
+new file mode 100644
+index 0000000..97636ff
+--- /dev/null
++++ b/src/components/ConfirmDialog.tsx
+@@ -0,0 +1,35 @@
++import Modal from "./Modal";
++
++interface ConfirmDialogProps {
++  title: string;
++  message: string;
++  confirmLabel?: string;
++  busy?: boolean;
++  onConfirm: () => void;
++  onCancel: () => void;
++}
++
++function ConfirmDialog({
++  title,
++  message,
++  confirmLabel = "حذف",
++  busy = false,
++  onConfirm,
++  onCancel,
++}: ConfirmDialogProps) {
++  return (
++    <Modal title={title} onClose={onCancel}>
++      <p>{message}</p>
++      <div className="actions">
++        <button className="btn btn-danger" onClick={onConfirm} disabled={busy}>
++          {busy ? "جاري الحذف..." : confirmLabel}
++        </button>
++        <button className="btn" onClick={onCancel} disabled={busy}>
++          إلغاء
++        </button>
++      </div>
++    </Modal>
++  );
++}
++
++export default ConfirmDialog;
+diff --git a/src/components/Field.tsx b/src/components/Field.tsx
+new file mode 100644
+index 0000000..78cf5a7
+--- /dev/null
++++ b/src/components/Field.tsx
+@@ -0,0 +1,25 @@
++import type { InputHTMLAttributes } from "react";
++
++interface FieldProps extends InputHTMLAttributes<HTMLInputElement> {
++  label: string;
++  error?: string;
++}
++
++function Field({ label, error, id, name, ...rest }: FieldProps) {
++  const inputId = id ?? name;
++
++  return (
++    <div className="field">
++      <label htmlFor={inputId}>{label}</label>
++      <input
++        id={inputId}
++        name={name}
++        aria-invalid={Boolean(error)}
++        {...rest}
++      />
++      {error && <span className="field-error">{error}</span>}
++    </div>
++  );
++}
++
++export default Field;
+diff --git a/src/components/Modal.tsx b/src/components/Modal.tsx
+new file mode 100644
+index 0000000..b84da09
+--- /dev/null
++++ b/src/components/Modal.tsx
+@@ -0,0 +1,35 @@
++import { useEffect } from "react";
++import type { ReactNode } from "react";
++
++interface ModalProps {
++  title: string;
++  onClose: () => void;
++  children: ReactNode;
++}
++
++function Modal({ title, onClose, children }: ModalProps) {
++  useEffect(() => {
++    const onKey = (event: KeyboardEvent) => {
++      if (event.key === "Escape") onClose();
++    };
++    window.addEventListener("keydown", onKey);
++    return () => window.removeEventListener("keydown", onKey);
++  }, [onClose]);
++
++  return (
++    <div className="modal-backdrop" onClick={onClose}>
++      <div
++        className="modal"
++        role="dialog"
++        aria-modal="true"
++        aria-label={title}
++        onClick={(event) => event.stopPropagation()}
++      >
++        <h2>{title}</h2>
++        {children}
++      </div>
++    </div>
++  );
++}
++
++export default Modal;
+diff --git a/src/components/ModelForm.tsx b/src/components/ModelForm.tsx
+index fbfe616..9edb315 100644
+--- a/src/components/ModelForm.tsx
++++ b/src/components/ModelForm.tsx
+@@ -1,103 +1,125 @@
+ import { useState } from "react";
+-import { createModel } from "../services/api";
+-import type { NewModelData } from "../types";
++import Field from "./Field";
++import type { Model, NewModelData } from "../types";
++import { hasErrors, validateModel } from "../utils/validation";
++import type { Errors } from "../utils/validation";
++import { toDateInput, today } from "../utils/format";
++
++interface ModelFormProps {
++  initial?: Model;
++  onSubmit: (data: NewModelData) => Promise<void>;
++  onCancel: () => void;
++}
+ 
+-function ModelForm() {
+-  const [formData, setFormData] = useState<NewModelData>({
+-    date: new Date().toISOString().split("T")[0],
+-    modelName: "",
+-    quantity: 0,
+-    pricePerPiece: 0,
+-    fabricCm: 0,
+-  });
++// الحقول بتتخزن كنص عشان المستخدم يقدر يمسح الرقم ويكتب من جديد براحته
++interface FormState {
++  date: string;
++  modelName: string;
++  quantity: string;
++  pricePerPiece: string;
++  fabricCm: string;
++}
+ 
+-  const [loading, setLoading] = useState(false);
+-  const [message, setMessage] = useState("");
++function ModelForm({ initial, onSubmit, onCancel }: ModelFormProps) {
++  const [form, setForm] = useState<FormState>({
++    date: initial ? toDateInput(initial.date) : today(),
++    modelName: initial?.modelName ?? "",
++    quantity: initial ? String(initial.quantity) : "",
++    pricePerPiece: initial ? String(initial.pricePerPiece) : "",
++    fabricCm: initial ? String(initial.fabricCm) : "",
++  });
++  const [errors, setErrors] = useState<Errors<NewModelData>>({});
++  const [submitError, setSubmitError] = useState("");
++  const [saving, setSaving] = useState(false);
+ 
+   function handleChange(event: React.ChangeEvent<HTMLInputElement>) {
+     const { name, value } = event.target;
+-
+-    setFormData((previous) => ({
+-      ...previous,
+-      [name]:
+-        name === "quantity" || name === "pricePerPiece" || name === "fabricCm"
+-          ? Number(value)
+-          : value,
+-    }));
++    setForm((previous) => ({ ...previous, [name]: value }));
++    setErrors((previous) => ({ ...previous, [name]: undefined }));
+   }
+ 
+   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+     event.preventDefault();
+ 
+-    try {
+-      setLoading(true);
+-      setMessage("");
+-
+-      await createModel(formData);
++    const data: NewModelData = {
++      date: form.date,
++      modelName: form.modelName.trim(),
++      quantity: Number(form.quantity),
++      pricePerPiece: Number(form.pricePerPiece),
++      fabricCm: Number(form.fabricCm),
++    };
+ 
+-      setMessage("تم إضافة الموديل بنجاح");
++    const found = validateModel(data);
++    setErrors(found);
++    if (hasErrors(found)) return;
+ 
+-      setFormData({
+-        date: new Date().toISOString().split("T")[0],
+-        modelName: "",
+-        quantity: 0,
+-        pricePerPiece: 0,
+-        fabricCm: 0,
+-      });
++    try {
++      setSaving(true);
++      setSubmitError("");
++      await onSubmit(data);
+     } catch (error) {
+       console.error(error);
+-      setMessage("حدث خطأ أثناء إضافة الموديل");
+-    } finally {
+-      setLoading(false);
++      setSubmitError("حدث خطأ أثناء الحفظ، حاول مرة تانية");
++      setSaving(false);
+     }
+   }
+ 
+   return (
+-    <form onSubmit={handleSubmit}>
+-      <input
++    <form onSubmit={handleSubmit} noValidate>
++      <Field
++        label="التاريخ"
+         type="date"
+         name="date"
+-        value={formData.date}
++        value={form.date}
+         onChange={handleChange}
++        error={errors.date}
+       />
+-
+-      <input
++      <Field
++        label="اسم الموديل"
+         type="text"
+         name="modelName"
+-        placeholder="اسم الموديل"
+-        value={formData.modelName}
++        value={form.modelName}
+         onChange={handleChange}
++        error={errors.modelName}
+       />
+-
+-      <input
++      <Field
++        label="عدد القطع"
+         type="number"
++        inputMode="numeric"
+         name="quantity"
+-        placeholder="عدد القطع"
+-        value={formData.quantity || ""}
++        value={form.quantity}
+         onChange={handleChange}
++        error={errors.quantity}
+       />
+-
+-      <input
++      <Field
++        label="سعر القطعة (جنيه)"
+         type="number"
++        inputMode="decimal"
+         name="pricePerPiece"
+-        placeholder="سعر القطعة"
+-        value={formData.pricePerPiece || ""}
++        value={form.pricePerPiece}
+         onChange={handleChange}
++        error={errors.pricePerPiece}
+       />
+-
+-      <input
++      <Field
++        label="المتراج للقطعة (سم)"
+         type="number"
++        inputMode="decimal"
+         name="fabricCm"
+-        placeholder="المتراج للقطعة بالسنتي"
+-        value={formData.fabricCm || ""}
++        value={form.fabricCm}
+         onChange={handleChange}
++        error={errors.fabricCm}
+       />
+ 
+-      <button type="submit" disabled={loading}>
+-        {loading ? "جاري الحفظ..." : "إضافة الموديل"}
+-      </button>
++      {submitError && <p className="form-error">{submitError}</p>}
+ 
+-      {message && <p>{message}</p>}
++      <div className="actions">
++        <button type="submit" className="btn btn-primary" disabled={saving}>
++          {saving ? "جاري الحفظ..." : initial ? "حفظ التعديل" : "إضافة الموديل"}
++        </button>
++        <button type="button" className="btn" onClick={onCancel} disabled={saving}>
++          إلغاء
++        </button>
++      </div>
+     </form>
+   );
+ }
+diff --git a/src/components/PaymentForm.tsx b/src/components/PaymentForm.tsx
+index 864d7c7..d478864 100644
+--- a/src/components/PaymentForm.tsx
++++ b/src/components/PaymentForm.tsx
+@@ -1,90 +1,101 @@
+ import { useState } from "react";
+-import { createPayment } from "../services/api";
+-import type { Payment } from "../types";
++import Field from "./Field";
++import type { NewPaymentData, Payment } from "../types";
++import { hasErrors, validatePayment } from "../utils/validation";
++import type { Errors } from "../utils/validation";
++import { toDateInput, today } from "../utils/format";
++
++interface PaymentFormProps {
++  initial?: Payment;
++  onSubmit: (data: NewPaymentData) => Promise<void>;
++  onCancel: () => void;
++}
+ 
+-type NewPaymentData = Omit<Payment, "id">;
++interface FormState {
++  date: string;
++  amount: string;
++  notes: string;
++}
+ 
+-function PaymentForm() {
+-  const [formData, setFormData] = useState<NewPaymentData>({
+-    date: new Date().toISOString().split("T")[0],
+-    amount: 0,
+-    notes: "",
++function PaymentForm({ initial, onSubmit, onCancel }: PaymentFormProps) {
++  const [form, setForm] = useState<FormState>({
++    date: initial ? toDateInput(initial.date) : today(),
++    amount: initial ? String(initial.amount) : "",
++    notes: initial?.notes ?? "",
+   });
++  const [errors, setErrors] = useState<Errors<NewPaymentData>>({});
++  const [submitError, setSubmitError] = useState("");
++  const [saving, setSaving] = useState(false);
+ 
+-  const [loading, setLoading] = useState(false);
+-  const [message, setMessage] = useState("");
+-
+-  function handleChange(
+-    event: React.ChangeEvent<HTMLInputElement>
+-  ) {
++  function handleChange(event: React.ChangeEvent<HTMLInputElement>) {
+     const { name, value } = event.target;
+-
+-    setFormData((previous) => ({
+-      ...previous,
+-      [name]: name === "amount" ? Number(value) : value,
+-    }));
++    setForm((previous) => ({ ...previous, [name]: value }));
++    setErrors((previous) => ({ ...previous, [name]: undefined }));
+   }
+ 
+-  async function handleSubmit(
+-    event: React.FormEvent<HTMLFormElement>
+-  ) {
++  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+     event.preventDefault();
+ 
+-    try {
+-      setLoading(true);
+-      setMessage("");
+-
+-      await createPayment(formData);
++    const data: NewPaymentData = {
++      date: form.date,
++      amount: Number(form.amount),
++      notes: form.notes.trim(),
++    };
+ 
+-      setMessage("تم تسجيل الدفعة بنجاح");
++    const found = validatePayment(data);
++    setErrors(found);
++    if (hasErrors(found)) return;
+ 
+-      setFormData({
+-        date: new Date().toISOString().split("T")[0],
+-        amount: 0,
+-        notes: "",
+-      });
++    try {
++      setSaving(true);
++      setSubmitError("");
++      await onSubmit(data);
+     } catch (error) {
+       console.error(error);
+-      setMessage("حدث خطأ أثناء تسجيل الدفعة");
+-    } finally {
+-      setLoading(false);
++      setSubmitError("حدث خطأ أثناء الحفظ، حاول مرة تانية");
++      setSaving(false);
+     }
+   }
+ 
+   return (
+-    <form onSubmit={handleSubmit}>
+-      <h2>إضافة دفعة</h2>
+-
+-      <input
++    <form onSubmit={handleSubmit} noValidate>
++      <Field
++        label="التاريخ"
+         type="date"
+         name="date"
+-        value={formData.date}
++        value={form.date}
+         onChange={handleChange}
++        error={errors.date}
+       />
+-
+-      <input
++      <Field
++        label="قيمة الدفعة (جنيه)"
+         type="number"
++        inputMode="decimal"
+         name="amount"
+-        placeholder="قيمة الدفعة"
+-        value={formData.amount || ""}
++        value={form.amount}
+         onChange={handleChange}
++        error={errors.amount}
+       />
+-
+-      <input
++      <Field
++        label="ملاحظات (اختياري)"
+         type="text"
+         name="notes"
+-        placeholder="ملاحظات"
+-        value={formData.notes}
++        value={form.notes}
+         onChange={handleChange}
+       />
+ 
+-      <button type="submit" disabled={loading}>
+-        {loading ? "جاري الحفظ..." : "تسجيل الدفعة"}
+-      </button>
++      {submitError && <p className="form-error">{submitError}</p>}
+ 
+-      {message && <p>{message}</p>}
++      <div className="actions">
++        <button type="submit" className="btn btn-primary" disabled={saving}>
++          {saving ? "جاري الحفظ..." : initial ? "حفظ التعديل" : "تسجيل الدفعة"}
++        </button>
++        <button type="button" className="btn" onClick={onCancel} disabled={saving}>
++          إلغاء
++        </button>
++      </div>
+     </form>
+   );
+ }
+ 
+-export default PaymentForm;
+\ No newline at end of file
++export default PaymentForm;
+diff --git a/src/index.css b/src/index.css
+index 5fb3313..485d994 100644
+--- a/src/index.css
++++ b/src/index.css
+@@ -1,111 +1,184 @@
+ :root {
+-  --text: #6b6375;
+-  --text-h: #08060d;
+-  --bg: #fff;
+-  --border: #e5e4e7;
+-  --code-bg: #f4f3ec;
+-  --accent: #aa3bff;
+-  --accent-bg: rgba(170, 59, 255, 0.1);
+-  --accent-border: rgba(170, 59, 255, 0.5);
+-  --social-bg: rgba(244, 243, 236, 0.5);
+-  --shadow:
+-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+-
+-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
+-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
+-  --mono: ui-monospace, Consolas, monospace;
+-
+-  font: 18px/145% var(--sans);
+-  letter-spacing: 0.18px;
+-  color-scheme: light dark;
++  --bg: #f4f6f5;
++  --surface: #ffffff;
++  --text: #1d2b27;
++  --muted: #62736d;
++  --border: #dbe3df;
++  --primary: #0f766e;
++  --primary-dark: #0b5a54;
++  --danger: #b42318;
++  --good: #067647;
++  --warn: #b54708;
++  --radius: 12px;
++  --tabbar-h: 62px;
++  font-family: Tahoma, "Segoe UI", system-ui, -apple-system, "Noto Naskh Arabic", sans-serif;
+   color: var(--text);
+   background: var(--bg);
+-  font-synthesis: none;
+-  text-rendering: optimizeLegibility;
+-  -webkit-font-smoothing: antialiased;
+-  -moz-osx-font-smoothing: grayscale;
+-
+-  @media (max-width: 1024px) {
+-    font-size: 16px;
+-  }
+ }
+ 
+-@media (prefers-color-scheme: dark) {
+-  :root {
+-    --text: #9ca3af;
+-    --text-h: #f3f4f6;
+-    --bg: #16171d;
+-    --border: #2e303a;
+-    --code-bg: #1f2028;
+-    --accent: #c084fc;
+-    --accent-bg: rgba(192, 132, 252, 0.15);
+-    --accent-border: rgba(192, 132, 252, 0.5);
+-    --social-bg: rgba(47, 48, 58, 0.5);
+-    --shadow:
+-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
+-  }
++* { box-sizing: border-box; }
++html, body, #root { min-height: 100%; }
++body { margin: 0; background: var(--bg); line-height: 1.5; }
++h1 { font-size: 1.35rem; margin: 0; }
++h2 { font-size: 1.1rem; margin: 0 0 12px; }
+ 
+-  #social .button-icon {
+-    filter: invert(1) brightness(2);
+-  }
++.app { min-height: 100vh; display: flex; flex-direction: column; }
++.app-header {
++  background: var(--primary);
++  color: #fff;
++  padding: 14px 16px;
++  font-weight: 700;
++  text-align: center;
++  padding-top: calc(14px + env(safe-area-inset-top));
+ }
+-
+-#root {
+-  width: 1126px;
+-  max-width: 100%;
++.app-main {
++  flex: 1;
++  width: 100%;
++  max-width: 960px;
+   margin: 0 auto;
+-  text-align: center;
+-  border-inline: 1px solid var(--border);
+-  min-height: 100svh;
++  padding: 16px 14px calc(var(--tabbar-h) + 24px + env(safe-area-inset-bottom));
++}
++
++/* Tab bar */
++.tabbar {
++  position: fixed;
++  inset-inline: 0;
++  bottom: 0;
+   display: flex;
+-  flex-direction: column;
+-  box-sizing: border-box;
++  background: var(--surface);
++  border-top: 1px solid var(--border);
++  height: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
++  padding-bottom: env(safe-area-inset-bottom);
++  z-index: 10;
++}
++.tab {
++  flex: 1;
++  border: 0;
++  background: none;
++  font: inherit;
++  font-size: 1rem;
++  color: var(--muted);
++  cursor: pointer;
++  border-top: 3px solid transparent;
+ }
++.tab.active { color: var(--primary); font-weight: 700; border-top-color: var(--primary); }
+ 
+-body {
+-  margin: 0;
++.page-head {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 10px;
++  margin-bottom: 14px;
+ }
+ 
+-h1,
+-h2 {
+-  font-family: var(--heading);
+-  font-weight: 500;
+-  color: var(--text-h);
++/* Buttons */
++.btn {
++  font: inherit;
++  padding: 10px 16px;
++  min-height: 44px;
++  border-radius: 10px;
++  border: 1px solid var(--border);
++  background: var(--surface);
++  color: var(--text);
++  cursor: pointer;
+ }
++.btn:disabled { opacity: 0.6; cursor: not-allowed; }
++.btn-primary { background: var(--primary); border-color: var(--primary); color: #fff; }
++.btn-primary:hover:not(:disabled) { background: var(--primary-dark); }
++.btn-danger { color: var(--danger); border-color: #f1b8b2; }
++.btn-danger:hover:not(:disabled) { background: #fef3f2; }
++.btn-sm { padding: 6px 12px; min-height: 36px; font-size: 0.9rem; }
++.btn-danger.btn-sm { background: var(--surface); }
+ 
+-h1 {
+-  font-size: 56px;
+-  letter-spacing: -1.68px;
+-  margin: 32px 0;
+-  @media (max-width: 1024px) {
+-    font-size: 36px;
+-    margin: 20px 0;
+-  }
++/* Dashboard */
++.balance-card {
++  border-radius: var(--radius);
++  padding: 20px;
++  color: #fff;
++  display: flex;
++  flex-direction: column;
++  gap: 4px;
++  margin-bottom: 14px;
++}
++.balance-card span { opacity: 0.9; }
++.balance-card strong { font-size: 2rem; }
++.balance-card em { font-style: normal; font-weight: 700; }
++.balance-card.owed-factory { background: var(--good); }
++.balance-card.owed-trader { background: var(--warn); }
++.balance-card.settled { background: #475467; }
++
++.cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
++.card, .totals > div {
++  background: var(--surface);
++  border: 1px solid var(--border);
++  border-radius: var(--radius);
++  padding: 14px;
++  display: flex;
++  flex-direction: column;
++  gap: 4px;
+ }
+-h2 {
+-  font-size: 24px;
+-  line-height: 118%;
+-  letter-spacing: -0.24px;
+-  margin: 0 0 8px;
+-  @media (max-width: 1024px) {
+-    font-size: 20px;
+-  }
++.card span, .totals span { color: var(--muted); font-size: 0.9rem; }
++.card strong, .totals strong { font-size: 1.15rem; }
++
++.totals { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 14px; }
++
++/* Table */
++.table-wrap {
++  overflow-x: auto;
++  background: var(--surface);
++  border: 1px solid var(--border);
++  border-radius: var(--radius);
+ }
+-p {
+-  margin: 0;
++table { width: 100%; border-collapse: collapse; min-width: 560px; }
++th, td { padding: 10px 12px; text-align: start; white-space: nowrap; border-bottom: 1px solid var(--border); }
++th { background: #eef3f1; color: var(--muted); font-size: 0.85rem; }
++tbody tr:last-child td { border-bottom: 0; }
++.row-actions { display: flex; gap: 6px; }
++
++/* States */
++.state { text-align: center; color: var(--muted); padding: 32px 12px; }
++.state-error { color: var(--danger); display: flex; flex-direction: column; align-items: center; gap: 10px; }
++.form-error { color: var(--danger); background: #fef3f2; border-radius: 8px; padding: 8px 12px; }
++
++/* Forms & modal */
++.field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
++.field label { font-weight: 700; font-size: 0.95rem; }
++.field input {
++  font: inherit;
++  padding: 10px 12px;
++  min-height: 44px;
++  border: 1px solid var(--border);
++  border-radius: 10px;
++  background: #fff;
+ }
++.field input:focus { outline: 2px solid var(--primary); border-color: var(--primary); }
++.field input[aria-invalid="true"] { border-color: var(--danger); }
++.field-error { color: var(--danger); font-size: 0.85rem; }
+ 
+-code,
+-.counter {
+-  font-family: var(--mono);
+-  display: inline-flex;
+-  border-radius: 4px;
+-  color: var(--text-h);
++.actions { display: flex; gap: 10px; margin-top: 8px; }
++.actions .btn { flex: 1; }
++
++.modal-backdrop {
++  position: fixed;
++  inset: 0;
++  background: rgba(16, 24, 21, 0.5);
++  display: flex;
++  align-items: flex-end;
++  justify-content: center;
++  z-index: 20;
++}
++.modal {
++  background: var(--surface);
++  width: 100%;
++  max-width: 480px;
++  max-height: 92vh;
++  overflow-y: auto;
++  border-radius: 16px 16px 0 0;
++  padding: 18px 16px calc(18px + env(safe-area-inset-bottom));
+ }
+ 
+-code {
+-  font-size: 15px;
+-  line-height: 135%;
+-  padding: 4px 8px;
+-  background: var(--code-bg);
++@media (min-width: 640px) {
++  .cards { grid-template-columns: repeat(4, 1fr); }
++  .modal-backdrop { align-items: center; }
++  .modal { border-radius: 16px; }
+ }
+diff --git a/src/main.tsx b/src/main.tsx
+index bef5202..ded3b23 100644
+--- a/src/main.tsx
++++ b/src/main.tsx
+@@ -1,10 +1,17 @@
+-import { StrictMode } from 'react'
+-import { createRoot } from 'react-dom/client'
+-import './index.css'
+-import App from './App.tsx'
++import { StrictMode } from "react";
++import { createRoot } from "react-dom/client";
++import "./index.css";
++import App from "./App.tsx";
+ 
+-createRoot(document.getElementById('root')!).render(
++createRoot(document.getElementById("root")!).render(
+   <StrictMode>
+     <App />
+-  </StrictMode>,
+-)
++  </StrictMode>
++);
++
++// تسجيل الـ service worker في النسخة الإنتاجية بس
++if ("serviceWorker" in navigator && import.meta.env.PROD) {
++  window.addEventListener("load", () => {
++    navigator.serviceWorker.register("/sw.js").catch(console.error);
++  });
++}
+diff --git a/src/pages/Dashboard.tsx b/src/pages/Dashboard.tsx
+index feff8a8..b29e20c 100644
+--- a/src/pages/Dashboard.tsx
++++ b/src/pages/Dashboard.tsx
+@@ -1,40 +1,59 @@
+ import { useEffect, useState } from "react";
+ import { getSummary } from "../services/api";
+-import type { Summary } from "../services/api";
++import type { Summary } from "../types";
++import { formatCurrency, formatMeters, formatNumber } from "../utils/format";
+ 
+ function Dashboard() {
+   const [summary, setSummary] = useState<Summary | null>(null);
+   const [loading, setLoading] = useState(true);
+   const [error, setError] = useState("");
+ 
++  const [reloadKey, setReloadKey] = useState(0);
++
+   useEffect(() => {
+-    async function loadSummary() {
++    let cancelled = false;
++
++    async function run() {
+       try {
+         const data = await getSummary();
++        if (cancelled) return;
+         setSummary(data);
+-      } catch (error) {
+-        console.error(error);
+-        setError("حدث خطأ أثناء تحميل الحساب");
++        setError("");
++      } catch (err) {
++        console.error(err);
++        if (!cancelled) setError("حدث خطأ أثناء تحميل الحساب");
+       } finally {
+-        setLoading(false);
++        if (!cancelled) setLoading(false);
+       }
+     }
+ 
+-    loadSummary();
+-  }, []);
+-
+-  if (loading) {
+-    return <p>جاري تحميل الحساب...</p>;
+-  }
++    void run();
++    return () => {
++      cancelled = true;
++    };
++  }, [reloadKey]);
+ 
+-  if (error) {
+-    return <p>{error}</p>;
++  function retry() {
++    setLoading(true);
++    setError("");
++    setReloadKey((key) => key + 1);
+   }
+ 
+-  if (!summary) {
+-    return null;
++  if (loading) return <p className="state">جاري تحميل الحساب...</p>;
++
++  if (error || !summary) {
++    return (
++      <div className="state state-error">
++        <p>{error || "لا توجد بيانات"}</p>
++        <button className="btn" onClick={retry}>
++          إعادة المحاولة
++        </button>
++      </div>
++    );
+   }
+ 
++  const tone =
++    summary.balance > 0 ? "owed-factory" : summary.balance < 0 ? "owed-trader" : "settled";
+   const balanceText =
+     summary.balance > 0
+       ? "مستحق للمصنع"
+@@ -43,44 +62,40 @@ function Dashboard() {
+         : "الحساب متسوي";
+ 
+   return (
+-    <main>
+-      <h1>الحسابات</h1>
+-
+-      <section>
+-        <h2>ملخص الحساب</h2>
+-
+-        <div>
+-          <p>إجمالي قيمة الشغل</p>
+-          <strong>{summary.totalWork} جنيه</strong>
++    <section>
++      <div className="page-head">
++        <h1>الحسابات</h1>
++        <button className="btn" onClick={retry}>
++          تحديث
++        </button>
++      </div>
++
++      <div className={`balance-card ${tone}`}>
++        <span>الرصيد الحالي</span>
++        <strong>{formatCurrency(Math.abs(summary.balance))}</strong>
++        <em>{balanceText}</em>
++      </div>
++
++      <div className="cards">
++        <div className="card">
++          <span>إجمالي قيمة الشغل</span>
++          <strong>{formatCurrency(summary.totalWork)}</strong>
+         </div>
+-
+-        <div>
+-          <p>إجمالي الدفعات</p>
+-          <strong>{summary.totalPayments} جنيه</strong>
++        <div className="card">
++          <span>إجمالي الدفعات</span>
++          <strong>{formatCurrency(summary.totalPayments)}</strong>
+         </div>
+-
+-        <div>
+-          <p>إجمالي القطع</p>
+-          <strong>{summary.totalPieces} قطعة</strong>
++        <div className="card">
++          <span>إجمالي القطع</span>
++          <strong>{formatNumber(summary.totalPieces)} قطعة</strong>
+         </div>
+-
+-        <div>
+-          <p>إجمالي المتراج</p>
+-          <strong>{summary.totalFabricCm / 100} متر</strong>
++        <div className="card">
++          <span>إجمالي المتراج</span>
++          <strong>{formatMeters(summary.totalFabricCm)}</strong>
+         </div>
+-      </section>
+-
+-      <section>
+-        <h2>الرصيد الحالي</h2>
+-
+-        <strong>
+-          {Math.abs(summary.balance)} جنيه
+-        </strong>
+-
+-        <p>{balanceText}</p>
+-      </section>
+-    </main>
++      </div>
++    </section>
+   );
+ }
+ 
+-export default Dashboard;
+\ No newline at end of file
++export default Dashboard;
+diff --git a/src/pages/Models.tsx b/src/pages/Models.tsx
+index ec3a516..7433542 100644
+--- a/src/pages/Models.tsx
++++ b/src/pages/Models.tsx
+@@ -1,73 +1,207 @@
+-import { useEffect, useState } from "react";
+-import { getModels } from "../services/api";
+-import type { Model } from "../types";
++import { useEffect, useMemo, useState } from "react";
++import ConfirmDialog from "../components/ConfirmDialog";
++import Modal from "../components/Modal";
++import ModelForm from "../components/ModelForm";
++import { createModel, deleteModel, getModels, updateModel } from "../services/api";
++import type { Model, NewModelData } from "../types";
++import {
++  formatCurrency,
++  formatMeters,
++  formatNumber,
++  toDateInput,
++} from "../utils/format";
+ 
+ function Models() {
+   const [models, setModels] = useState<Model[]>([]);
+   const [loading, setLoading] = useState(true);
+   const [error, setError] = useState("");
+ 
++  // "new" = إضافة، Model = تعديل، null = الفورم مقفول
++  const [editing, setEditing] = useState<Model | "new" | null>(null);
++  const [deleting, setDeleting] = useState<Model | null>(null);
++  const [deleteBusy, setDeleteBusy] = useState(false);
++  const [actionError, setActionError] = useState("");
++
++  const [reloadKey, setReloadKey] = useState(0);
++
+   useEffect(() => {
+-    async function loadModels() {
++    let cancelled = false;
++
++    async function run() {
+       try {
+         const data = await getModels();
++        if (cancelled) return;
+         setModels(data);
+-      } catch (error) {
+-        console.error(error);
+-        setError("حدث خطأ أثناء تحميل الموديلات");
++        setError("");
++      } catch (err) {
++        console.error(err);
++        if (!cancelled) setError("حدث خطأ أثناء تحميل الموديلات");
+       } finally {
+-        setLoading(false);
++        if (!cancelled) setLoading(false);
+       }
+     }
+ 
+-    loadModels();
+-  }, []);
++    void run();
++    return () => {
++      cancelled = true;
++    };
++  }, [reloadKey]);
+ 
+-  if (loading) {
+-    return <p>جاري تحميل الموديلات...</p>;
++  function retry() {
++    setLoading(true);
++    setError("");
++    setReloadKey((key) => key + 1);
+   }
+ 
+-  if (error) {
+-    return <p>{error}</p>;
++  // الأحدث فوق
++  const sorted = useMemo(
++    () => [...models].sort((a, b) => b.date.localeCompare(a.date)),
++    [models]
++  );
++
++  const totals = useMemo(
++    () => ({
++      pieces: models.reduce((sum, m) => sum + m.quantity, 0),
++      price: models.reduce((sum, m) => sum + m.totalPrice, 0),
++      fabricCm: models.reduce((sum, m) => sum + m.totalFabricCm, 0),
++    }),
++    [models]
++  );
++
++  async function handleSave(data: NewModelData) {
++    if (editing && editing !== "new") {
++      const updated = await updateModel(editing.id, data);
++      setModels((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
++    } else {
++      const created = await createModel(data);
++      setModels((prev) => [...prev, created]);
++    }
++    setEditing(null);
++  }
++
++  async function handleDelete() {
++    if (!deleting) return;
++    try {
++      setDeleteBusy(true);
++      setActionError("");
++      await deleteModel(deleting.id);
++      setModels((prev) => prev.filter((m) => m.id !== deleting.id));
++      setDeleting(null);
++    } catch (err) {
++      console.error(err);
++      setActionError("تعذر حذف الموديل، حاول مرة تانية");
++      setDeleting(null);
++    } finally {
++      setDeleteBusy(false);
++    }
+   }
+ 
+   return (
+-    <div>
+-      <h1>الموديلات</h1>
++    <section>
++      <div className="page-head">
++        <h1>الموديلات</h1>
++        <button className="btn btn-primary" onClick={() => setEditing("new")}>
++          + إضافة موديل
++        </button>
++      </div>
+ 
+-      {models.length === 0 ? (
+-        <p>لا توجد موديلات حتى الآن.</p>
++      {actionError && <p className="form-error">{actionError}</p>}
++
++      {loading ? (
++        <p className="state">جاري تحميل الموديلات...</p>
++      ) : error ? (
++        <div className="state state-error">
++          <p>{error}</p>
++          <button className="btn" onClick={retry}>
++            إعادة المحاولة
++          </button>
++        </div>
++      ) : models.length === 0 ? (
++        <p className="state">لا توجد موديلات حتى الآن. اضغط "إضافة موديل" للبدء.</p>
+       ) : (
+-        <table>
+-          <thead>
+-            <tr>
+-              <th>التاريخ</th>
+-              <th>الموديل</th>
+-              <th>عدد القطع</th>
+-              <th>سعر القطعة</th>
+-              <th>المتراج</th>
+-              <th>إجمالي السعر</th>
+-              <th>إجمالي المتراج</th>
+-            </tr>
+-          </thead>
+-
+-          <tbody>
+-            {models.map((model) => (
+-              <tr key={model.id}>
+-                <td>{model.date}</td>
+-                <td>{model.modelName}</td>
+-                <td>{model.quantity}</td>
+-                <td>{model.pricePerPiece}</td>
+-                <td>{model.fabricCm} سم</td>
+-                <td>{model.totalPrice} جنيه</td>
+-                <td>{model.totalFabricCm} سم</td>
+-              </tr>
+-            ))}
+-          </tbody>
+-        </table>
++        <>
++          <div className="totals">
++            <div>
++              <span>إجمالي القطع</span>
++              <strong>{formatNumber(totals.pieces)}</strong>
++            </div>
++            <div>
++              <span>إجمالي القيمة</span>
++              <strong>{formatCurrency(totals.price)}</strong>
++            </div>
++            <div>
++              <span>إجمالي المتراج</span>
++              <strong>{formatMeters(totals.fabricCm)}</strong>
++            </div>
++          </div>
++
++          <div className="table-wrap">
++            <table>
++              <thead>
++                <tr>
++                  <th>التاريخ</th>
++                  <th>الموديل</th>
++                  <th>القطع</th>
++                  <th>سعر القطعة</th>
++                  <th>المتراج/قطعة</th>
++                  <th>إجمالي السعر</th>
++                  <th>إجمالي المتراج</th>
++                  <th></th>
++                </tr>
++              </thead>
++              <tbody>
++                {sorted.map((model) => (
++                  <tr key={model.id}>
++                    <td>{toDateInput(model.date)}</td>
++                    <td>{model.modelName}</td>
++                    <td>{formatNumber(model.quantity)}</td>
++                    <td>{formatCurrency(model.pricePerPiece)}</td>
++                    <td>{formatNumber(model.fabricCm)} سم</td>
++                    <td>{formatCurrency(model.totalPrice)}</td>
++                    <td>{formatMeters(model.totalFabricCm)}</td>
++                    <td className="row-actions">
++                      <button className="btn btn-sm" onClick={() => setEditing(model)}>
++                        تعديل
++                      </button>
++                      <button
++                        className="btn btn-sm btn-danger"
++                        onClick={() => setDeleting(model)}
++                      >
++                        حذف
++                      </button>
++                    </td>
++                  </tr>
++                ))}
++              </tbody>
++            </table>
++          </div>
++        </>
++      )}
++
++      {editing && (
++        <Modal
++          title={editing === "new" ? "إضافة موديل" : "تعديل الموديل"}
++          onClose={() => setEditing(null)}
++        >
++          <ModelForm
++            initial={editing === "new" ? undefined : editing}
++            onSubmit={handleSave}
++            onCancel={() => setEditing(null)}
++          />
++        </Modal>
++      )}
++
++      {deleting && (
++        <ConfirmDialog
++          title="حذف الموديل"
++          message={`متأكد إنك عايز تحذف موديل "${deleting.modelName}"؟ مش هتقدر ترجّعه.`}
++          busy={deleteBusy}
++          onConfirm={handleDelete}
++          onCancel={() => setDeleting(null)}
++        />
+       )}
+-    </div>
++    </section>
+   );
+ }
+ 
+-export default Models;
+\ No newline at end of file
++export default Models;
+diff --git a/src/pages/Payments.tsx b/src/pages/Payments.tsx
+index e69de29..6f01d64 100644
+--- a/src/pages/Payments.tsx
++++ b/src/pages/Payments.tsx
+@@ -0,0 +1,189 @@
++import { useEffect, useMemo, useState } from "react";
++import ConfirmDialog from "../components/ConfirmDialog";
++import Modal from "../components/Modal";
++import PaymentForm from "../components/PaymentForm";
++import {
++  createPayment,
++  deletePayment,
++  getPayments,
++  updatePayment,
++} from "../services/api";
++import type { NewPaymentData, Payment } from "../types";
++import { formatCurrency, toDateInput } from "../utils/format";
++
++function Payments() {
++  const [payments, setPayments] = useState<Payment[]>([]);
++  const [loading, setLoading] = useState(true);
++  const [error, setError] = useState("");
++
++  const [editing, setEditing] = useState<Payment | "new" | null>(null);
++  const [deleting, setDeleting] = useState<Payment | null>(null);
++  const [deleteBusy, setDeleteBusy] = useState(false);
++  const [actionError, setActionError] = useState("");
++
++  const [reloadKey, setReloadKey] = useState(0);
++
++  useEffect(() => {
++    let cancelled = false;
++
++    async function run() {
++      try {
++        const data = await getPayments();
++        if (cancelled) return;
++        setPayments(data);
++        setError("");
++      } catch (err) {
++        console.error(err);
++        if (!cancelled) setError("حدث خطأ أثناء تحميل الدفعات");
++      } finally {
++        if (!cancelled) setLoading(false);
++      }
++    }
++
++    void run();
++    return () => {
++      cancelled = true;
++    };
++  }, [reloadKey]);
++
++  function retry() {
++    setLoading(true);
++    setError("");
++    setReloadKey((key) => key + 1);
++  }
++
++  const sorted = useMemo(
++    () => [...payments].sort((a, b) => b.date.localeCompare(a.date)),
++    [payments]
++  );
++
++  const total = useMemo(
++    () => payments.reduce((sum, p) => sum + p.amount, 0),
++    [payments]
++  );
++
++  async function handleSave(data: NewPaymentData) {
++    if (editing && editing !== "new") {
++      const updated = await updatePayment(editing.id, data);
++      setPayments((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
++    } else {
++      const created = await createPayment(data);
++      setPayments((prev) => [...prev, created]);
++    }
++    setEditing(null);
++  }
++
++  async function handleDelete() {
++    if (!deleting) return;
++    try {
++      setDeleteBusy(true);
++      setActionError("");
++      await deletePayment(deleting.id);
++      setPayments((prev) => prev.filter((p) => p.id !== deleting.id));
++      setDeleting(null);
++    } catch (err) {
++      console.error(err);
++      setActionError("تعذر حذف الدفعة، حاول مرة تانية");
++      setDeleting(null);
++    } finally {
++      setDeleteBusy(false);
++    }
++  }
++
++  return (
++    <section>
++      <div className="page-head">
++        <h1>الدفعات</h1>
++        <button className="btn btn-primary" onClick={() => setEditing("new")}>
++          + إضافة دفعة
++        </button>
++      </div>
++
++      {actionError && <p className="form-error">{actionError}</p>}
++
++      {loading ? (
++        <p className="state">جاري تحميل الدفعات...</p>
++      ) : error ? (
++        <div className="state state-error">
++          <p>{error}</p>
++          <button className="btn" onClick={retry}>
++            إعادة المحاولة
++          </button>
++        </div>
++      ) : payments.length === 0 ? (
++        <p className="state">لا توجد دفعات حتى الآن. اضغط "إضافة دفعة" للبدء.</p>
++      ) : (
++        <>
++          <div className="totals">
++            <div>
++              <span>إجمالي الدفعات</span>
++              <strong>{formatCurrency(total)}</strong>
++            </div>
++            <div>
++              <span>عدد الدفعات</span>
++              <strong>{payments.length}</strong>
++            </div>
++          </div>
++
++          <div className="table-wrap">
++            <table>
++              <thead>
++                <tr>
++                  <th>التاريخ</th>
++                  <th>القيمة</th>
++                  <th>ملاحظات</th>
++                  <th></th>
++                </tr>
++              </thead>
++              <tbody>
++                {sorted.map((payment) => (
++                  <tr key={payment.id}>
++                    <td>{toDateInput(payment.date)}</td>
++                    <td>{formatCurrency(payment.amount)}</td>
++                    <td>{payment.notes || "—"}</td>
++                    <td className="row-actions">
++                      <button className="btn btn-sm" onClick={() => setEditing(payment)}>
++                        تعديل
++                      </button>
++                      <button
++                        className="btn btn-sm btn-danger"
++                        onClick={() => setDeleting(payment)}
++                      >
++                        حذف
++                      </button>
++                    </td>
++                  </tr>
++                ))}
++              </tbody>
++            </table>
++          </div>
++        </>
++      )}
++
++      {editing && (
++        <Modal
++          title={editing === "new" ? "إضافة دفعة" : "تعديل الدفعة"}
++          onClose={() => setEditing(null)}
++        >
++          <PaymentForm
++            initial={editing === "new" ? undefined : editing}
++            onSubmit={handleSave}
++            onCancel={() => setEditing(null)}
++          />
++        </Modal>
++      )}
++
++      {deleting && (
++        <ConfirmDialog
++          title="حذف الدفعة"
++          message={`متأكد إنك عايز تحذف دفعة ${formatCurrency(deleting.amount)} بتاريخ ${toDateInput(deleting.date)}؟`}
++          busy={deleteBusy}
++          onConfirm={handleDelete}
++          onCancel={() => setDeleting(null)}
++        />
++      )}
++    </section>
++  );
++}
++
++export default Payments;
+diff --git a/src/services/api.ts b/src/services/api.ts
+index 20702cd..99179d7 100644
+--- a/src/services/api.ts
++++ b/src/services/api.ts
+@@ -1,92 +1,76 @@
+-import type { Model, Payment, NewModelData } from "../types";
++import type {
++  Model,
++  NewModelData,
++  NewPaymentData,
++  Payment,
++  Summary,
++} from "../types";
++
++const API_URL = import.meta.env.VITE_API_URL as string;
++const API_TOKEN = (import.meta.env.VITE_API_TOKEN as string | undefined) ?? "";
++
++/** القراءة: GET */
++async function get<T>(action: string): Promise<T> {
++  const response = await fetch(`${API_URL}?action=${action}`, {
++    cache: "no-store",
++  });
+ 
+-const API_URL = import.meta.env.VITE_API_URL;
++  if (!response.ok) throw new Error(`Failed to fetch ${action}`);
+ 
+-//////////////////////get models and payments//////////////////////////
+-export async function getModels(): Promise<Model[]> {
+-  const response = await fetch(`${API_URL}?action=models`);
++  const result = await response.json();
+ 
+-  if (!response.ok) throw new Error(`Failed to fetch models`);
++  // الـ Apps Script بيرجّع { success:false, message } عند الأخطاء
++  if (result && typeof result === "object" && result.success === false) {
++    throw new Error(result.message || `Failed to fetch ${action}`);
++  }
+ 
+-  return response.json();
++  return result as T;
+ }
+-export async function getPayments(): Promise<Payment[]> {
+-  const response = await fetch(`${API_URL}?action=payments`);
+-
+-  if (!response.ok) throw new Error(`Failed to fetch payments`);
+ 
+-  return response.json();
+-}
+-///////////////////////add payment//////////////////////////
+-export async function createPayment(
+-  data: Omit<Payment, "id">
+-): Promise<Payment> {
+-  const params = new URLSearchParams({
+-    action: "addPayment",
+-    date: data.date,
+-    amount: String(data.amount),
+-    notes: data.notes? data.notes : "",
++/**
++ * الكتابة: POST.
++ * بنبعت Content-Type: text/plain عشان الطلب يبقى "simple request"
++ * ومايحصلش CORS preflight (Apps Script مابيدعمش OPTIONS).
++ */
++async function post<T>(action: string, payload: object): Promise<T> {
++  const response = await fetch(API_URL, {
++    method: "POST",
++    headers: { "Content-Type": "text/plain;charset=utf-8" },
++    body: JSON.stringify({ action, token: API_TOKEN, ...payload }),
+   });
+ 
+-  const response = await fetch(
+-    `${API_URL}?${params.toString()}`
+-  );
+-
+-  if (!response.ok) {
+-    throw new Error("Failed to create payment");
+-  }
++  if (!response.ok) throw new Error(`Request failed: ${action}`);
+ 
+   const result = await response.json();
+ 
+   if (!result.success) {
+-    throw new Error(result.message);
++    throw new Error(result.message || `Request failed: ${action}`);
+   }
+ 
+-  return result.data;
++  return result.data as T;
+ }
+-////////////////////////add model//////////////////////////
+-export async function createModel(data: NewModelData): Promise<Model> {
+-  const params = new URLSearchParams({
+-    action: "addModel",
+-    date: data.date,
+-    modelName: data.modelName,
+-    quantity: String(data.quantity),
+-    pricePerPiece: String(data.pricePerPiece),
+-    fabricCm: String(data.fabricCm),
+-  });
+-
+-  const response = await fetch(`${API_URL}?${params.toString()}`, {
+-    cache: "no-store",
+-  });
+ 
+-  if (!response.ok) {
+-    throw new Error("Failed to create model");
+-  }
++// ---------- Read ----------
++export const getModels = () => get<Model[]>("models");
++export const getPayments = () => get<Payment[]>("payments");
++export const getSummary = () => get<Summary>("summary");
+ 
+-  const result = await response.json();
++// ---------- Models ----------
++export const createModel = (data: NewModelData) =>
++  post<Model>("addModel", data);
+ 
+-  if (!result.success) {
+-    throw new Error(result.message);
+-  }
++export const updateModel = (id: string, data: NewModelData) =>
++  post<Model>("updateModel", { id, ...data });
+ 
+-  return result.data;
+-}
+-///////////summary//////////
+-
+-export interface Summary {
+-  totalWork: number;
+-  totalPayments: number;
+-  balance: number;
+-  totalPieces: number;
+-  totalFabricCm: number;
+-}
++export const deleteModel = (id: string) =>
++  post<{ id: string }>("deleteModel", { id });
+ 
+-export async function getSummary(): Promise<Summary> {
+-  const response = await fetch(`${API_URL}?action=summary`);
++// ---------- Payments ----------
++export const createPayment = (data: NewPaymentData) =>
++  post<Payment>("addPayment", data);
+ 
+-  if (!response.ok) {
+-    throw new Error("Failed to fetch summary");
+-  }
++export const updatePayment = (id: string, data: NewPaymentData) =>
++  post<Payment>("updatePayment", { id, ...data });
+ 
+-  return response.json();
+-}
++export const deletePayment = (id: string) =>
++  post<{ id: string }>("deletePayment", { id });
+diff --git a/src/types/index.ts b/src/types/index.ts
+index db39a38..a36f7c2 100644
+--- a/src/types/index.ts
++++ b/src/types/index.ts
+@@ -17,10 +17,19 @@ export interface NewModelData {
+   fabricCm: number;
+ }
+ 
+-
+ export interface Payment {
+   id: string;
+   date: string;
+   amount: number;
+   notes?: string;
+ }
++
++export type NewPaymentData = Omit<Payment, "id">;
++
++export interface Summary {
++  totalWork: number;
++  totalPayments: number;
++  balance: number;
++  totalPieces: number;
++  totalFabricCm: number;
++}
+diff --git a/src/utils/format.ts b/src/utils/format.ts
+new file mode 100644
+index 0000000..064dbd4
+--- /dev/null
++++ b/src/utils/format.ts
+@@ -0,0 +1,27 @@
++const numberFormat = new Intl.NumberFormat("en-US", {
++  maximumFractionDigits: 2,
++});
++
++export const formatNumber = (value: number) => numberFormat.format(value);
++
++export const formatCurrency = (value: number) =>
++  `${formatNumber(value)} جنيه`;
++
++/** السنتيمتر → متر */
++export const cmToMeters = (cm: number) => cm / 100;
++
++export const formatMeters = (cm: number) =>
++  `${formatNumber(cmToMeters(cm))} متر`;
++
++/** تاريخ اليوم بصيغة yyyy-mm-dd حسب توقيت الجهاز (مش UTC) */
++export function today(): string {
++  const now = new Date();
++  const month = String(now.getMonth() + 1).padStart(2, "0");
++  const day = String(now.getDate()).padStart(2, "0");
++  return `${now.getFullYear()}-${month}-${day}`;
++}
++
++/** بيقبل yyyy-mm-dd أو ISO كامل ويرجّع yyyy-mm-dd */
++export function toDateInput(value: string): string {
++  return value ? value.slice(0, 10) : "";
++}
+diff --git a/src/utils/validation.ts b/src/utils/validation.ts
+new file mode 100644
+index 0000000..7545e20
+--- /dev/null
++++ b/src/utils/validation.ts
+@@ -0,0 +1,29 @@
++import type { NewModelData, NewPaymentData } from "../types";
++
++export type Errors<T> = Partial<Record<keyof T, string>>;
++
++export function validateModel(data: NewModelData): Errors<NewModelData> {
++  const errors: Errors<NewModelData> = {};
++
++  if (!data.date) errors.date = "التاريخ مطلوب";
++  if (!data.modelName.trim()) errors.modelName = "اسم الموديل مطلوب";
++  if (!(data.quantity > 0)) errors.quantity = "عدد القطع لازم يكون أكبر من 0";
++  if (!(data.pricePerPiece > 0))
++    errors.pricePerPiece = "سعر القطعة لازم يكون أكبر من 0";
++  if (!(data.fabricCm > 0)) errors.fabricCm = "المتراج لازم يكون أكبر من 0";
++
++  return errors;
++}
++
++export function validatePayment(
++  data: NewPaymentData
++): Errors<NewPaymentData> {
++  const errors: Errors<NewPaymentData> = {};
++
++  if (!data.date) errors.date = "التاريخ مطلوب";
++  if (!(data.amount > 0)) errors.amount = "قيمة الدفعة لازم تكون أكبر من 0";
++
++  return errors;
++}
++
++export const hasErrors = (errors: object) => Object.keys(errors).length > 0;
+-- 
+2.43.0
+

@@ -1,88 +1,99 @@
 import { useState } from "react";
-import { createPayment } from "../services/api";
-import type { Payment } from "../types";
+import Field from "./Field";
+import type { NewPaymentData, Payment } from "../types";
+import { hasErrors, validatePayment } from "../utils/validation";
+import type { Errors } from "../utils/validation";
+import { toDateInput, today } from "../utils/format";
 
-type NewPaymentData = Omit<Payment, "id">;
+interface PaymentFormProps {
+  initial?: Payment;
+  onSubmit: (data: NewPaymentData) => Promise<void>;
+  onCancel: () => void;
+}
 
-function PaymentForm() {
-  const [formData, setFormData] = useState<NewPaymentData>({
-    date: new Date().toISOString().split("T")[0],
-    amount: 0,
-    notes: "",
+interface FormState {
+  date: string;
+  amount: string;
+  notes: string;
+}
+
+function PaymentForm({ initial, onSubmit, onCancel }: PaymentFormProps) {
+  const [form, setForm] = useState<FormState>({
+    date: initial ? toDateInput(initial.date) : today(),
+    amount: initial ? String(initial.amount) : "",
+    notes: initial?.notes ?? "",
   });
+  const [errors, setErrors] = useState<Errors<NewPaymentData>>({});
+  const [submitError, setSubmitError] = useState("");
+  const [saving, setSaving] = useState(false);
 
-  const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState("");
-
-  function handleChange(
-    event: React.ChangeEvent<HTMLInputElement>
-  ) {
+  function handleChange(event: React.ChangeEvent<HTMLInputElement>) {
     const { name, value } = event.target;
-
-    setFormData((previous) => ({
-      ...previous,
-      [name]: name === "amount" ? Number(value) : value,
-    }));
+    setForm((previous) => ({ ...previous, [name]: value }));
+    setErrors((previous) => ({ ...previous, [name]: undefined }));
   }
 
-  async function handleSubmit(
-    event: React.FormEvent<HTMLFormElement>
-  ) {
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
+    const data: NewPaymentData = {
+      date: form.date,
+      amount: Number(form.amount),
+      notes: form.notes.trim(),
+    };
+
+    const found = validatePayment(data);
+    setErrors(found);
+    if (hasErrors(found)) return;
+
     try {
-      setLoading(true);
-      setMessage("");
-
-      await createPayment(formData);
-
-      setMessage("تم تسجيل الدفعة بنجاح");
-
-      setFormData({
-        date: new Date().toISOString().split("T")[0],
-        amount: 0,
-        notes: "",
-      });
+      setSaving(true);
+      setSubmitError("");
+      await onSubmit(data);
     } catch (error) {
       console.error(error);
-      setMessage("حدث خطأ أثناء تسجيل الدفعة");
-    } finally {
-      setLoading(false);
+      setSubmitError("حدث خطأ أثناء الحفظ، حاول مرة تانية");
+      setSaving(false);
     }
   }
 
   return (
-    <form onSubmit={handleSubmit}>
-      <h2>إضافة دفعة</h2>
-
-      <input
+    <form onSubmit={handleSubmit} noValidate>
+      <Field
+        label="التاريخ"
         type="date"
         name="date"
-        value={formData.date}
+        value={form.date}
         onChange={handleChange}
+        error={errors.date}
       />
-
-      <input
+      <Field
+        label="قيمة الدفعة (جنيه)"
         type="number"
+        inputMode="decimal"
         name="amount"
-        placeholder="قيمة الدفعة"
-        value={formData.amount || ""}
+        value={form.amount}
         onChange={handleChange}
+        error={errors.amount}
       />
-
-      <input
+      <Field
+        label="ملاحظات (اختياري)"
         type="text"
         name="notes"
-        placeholder="ملاحظات"
-        value={formData.notes}
+        value={form.notes}
         onChange={handleChange}
       />
 
-      <button type="submit" disabled={loading}>
-        {loading ? "جاري الحفظ..." : "تسجيل الدفعة"}
-      </button>
+      {submitError && <p className="form-error">{submitError}</p>}
 
-      {message && <p>{message}</p>}
+      <div className="actions">
+        <button type="submit" className="btn btn-primary" disabled={saving}>
+          {saving ? "جاري الحفظ..." : initial ? "حفظ التعديل" : "تسجيل الدفعة"}
+        </button>
+        <button type="button" className="btn" onClick={onCancel} disabled={saving}>
+          إلغاء
+        </button>
+      </div>
     </form>
   );
 }

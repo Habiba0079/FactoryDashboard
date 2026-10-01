@@ -17,10 +17,19 @@ export interface NewModelData {
   fabricCm: number;
 }
 
-
 export interface Payment {
   id: string;
   date: string;
   amount: number;
   notes?: string;
+}
+
+export type NewPaymentData = Omit<Payment, "id">;
+
+export interface Summary {
+  totalWork: number;
+  totalPayments: number;
+  balance: number;
+  totalPieces: number;
+  totalFabricCm: number;
 }

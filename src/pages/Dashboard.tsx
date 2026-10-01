@@ -1,40 +1,59 @@
 import { useEffect, useState } from "react";
 import { getSummary } from "../services/api";
-import type { Summary } from "../services/api";
+import type { Summary } from "../types";
+import { formatCurrency, formatMeters, formatNumber } from "../utils/format";
 
 function Dashboard() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
+  const [reloadKey, setReloadKey] = useState(0);
+
   useEffect(() => {
-    async function loadSummary() {
+    let cancelled = false;
+
+    async function run() {
       try {
         const data = await getSummary();
+        if (cancelled) return;
         setSummary(data);
-      } catch (error) {
-        console.error(error);
-        setError("حدث خطأ أثناء تحميل الحساب");
+        setError("");
+      } catch (err) {
+        console.error(err);
+        if (!cancelled) setError("حدث خطأ أثناء تحميل الحساب");
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     }
 
-    loadSummary();
-  }, []);
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [reloadKey]);
 
-  if (loading) {
-    return <p>جاري تحميل الحساب...</p>;
+  function retry() {
+    setLoading(true);
+    setError("");
+    setReloadKey((key) => key + 1);
   }
 
-  if (error) {
-    return <p>{error}</p>;
+  if (loading) return <p className="state">جاري تحميل الحساب...</p>;
+
+  if (error || !summary) {
+    return (
+      <div className="state state-error">
+        <p>{error || "لا توجد بيانات"}</p>
+        <button className="btn" onClick={retry}>
+          إعادة المحاولة
+        </button>
+      </div>
+    );
   }
 
-  if (!summary) {
-    return null;
-  }
-
+  const tone =
+    summary.balance > 0 ? "owed-factory" : summary.balance < 0 ? "owed-trader" : "settled";
   const balanceText =
     summary.balance > 0
       ? "مستحق للمصنع"
@@ -43,43 +62,39 @@ function Dashboard() {
         : "الحساب متسوي";
 
   return (
-    <main>
-      <h1>الحسابات</h1>
+    <section>
+      <div className="page-head">
+        <h1>الحسابات</h1>
+        <button className="btn" onClick={retry}>
+          تحديث
+        </button>
+      </div>
 
-      <section>
-        <h2>ملخص الحساب</h2>
+      <div className={`balance-card ${tone}`}>
+        <span>الرصيد الحالي</span>
+        <strong>{formatCurrency(Math.abs(summary.balance))}</strong>
+        <em>{balanceText}</em>
+      </div>
 
-        <div>
-          <p>إجمالي قيمة الشغل</p>
-          <strong>{summary.totalWork} جنيه</strong>
+      <div className="cards">
+        <div className="card">
+          <span>إجمالي قيمة الشغل</span>
+          <strong>{formatCurrency(summary.totalWork)}</strong>
         </div>
-
-        <div>
-          <p>إجمالي الدفعات</p>
-          <strong>{summary.totalPayments} جنيه</strong>
+        <div className="card">
+          <span>إجمالي الدفعات</span>
+          <strong>{formatCurrency(summary.totalPayments)}</strong>
         </div>
-
-        <div>
-          <p>إجمالي القطع</p>
-          <strong>{summary.totalPieces} قطعة</strong>
+        <div className="card">
+          <span>إجمالي القطع</span>
+          <strong>{formatNumber(summary.totalPieces)} قطعة</strong>
         </div>
-
-        <div>
-          <p>إجمالي المتراج</p>
-          <strong>{summary.totalFabricCm / 100} متر</strong>
+        <div className="card">
+          <span>إجمالي المتراج</span>
+          <strong>{formatMeters(summary.totalFabricCm)}</strong>
         </div>
-      </section>
-
-      <section>
-        <h2>الرصيد الحالي</h2>
-
-        <strong>
-          {Math.abs(summary.balance)} جنيه
-        </strong>
-
-        <p>{balanceText}</p>
-      </section>
-    </main>
+      </div>
+    </section>
   );
 }
 

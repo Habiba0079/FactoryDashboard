@@ -1,58 +1,42 @@
-import { useEffect, useState } from "react";
-import { getSummary } from "./services/api";
-import type { Summary } from "./services/api";
-import ModelForm from "./components/ModelForm";
-import Models from "./pages/Models";
-import PaymentForm from "./components/PaymentForm";
+import { useState } from "react";
 import Dashboard from "./pages/Dashboard";
+import Models from "./pages/Models";
+import Payments from "./pages/Payments";
+
+type Tab = "dashboard" | "models" | "payments";
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: "dashboard", label: "الحساب" },
+  { id: "models", label: "الموديلات" },
+  { id: "payments", label: "الدفعات" },
+];
 
 function App() {
-  const [summary, setSummary] = useState<Summary | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [tab, setTab] = useState<Tab>("dashboard");
 
-  useEffect(() => {
-    async function loadSummary() {
-      try {
-        const data = await getSummary();
-        setSummary(data);
-      } catch (error) {
-        setError("حدث خطأ أثناء تحميل البيانات");
-        console.error(error);
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    loadSummary();
-  }, []);
-
-  if (loading) {
-    return <h1>Loading...</h1>;
-  }
-
-  if (error) {
-    return <h1>{error}</h1>;
-  }
-
+  // بنعرض الصفحة النشطة بس، فكل مرة تفتحها بتتحمّل بيانات جديدة
   return (
-    <div>
-      <h1>Factory Accounts</h1>
+    <div className="app">
+      <header className="app-header">Factory Accounts</header>
 
-      {summary && (
-        <div>
-          <p>Total Work: {summary.totalWork}</p>
-          <p>Total Payments: {summary.totalPayments}</p>
-          <p>Balance: {summary.balance}</p>
-          <p>Total Pieces: {summary.totalPieces}</p>
-          <p>Total Fabric: {summary.totalFabricCm} cm</p>
-        </div>
-      )}
+      <main className="app-main">
+        {tab === "dashboard" && <Dashboard />}
+        {tab === "models" && <Models />}
+        {tab === "payments" && <Payments />}
+      </main>
 
-      <ModelForm />
-      <Models />
-      <PaymentForm />
-      <Dashboard />
+      <nav className="tabbar" aria-label="التنقل">
+        {TABS.map(({ id, label }) => (
+          <button
+            key={id}
+            className={tab === id ? "tab active" : "tab"}
+            aria-current={tab === id ? "page" : undefined}
+            onClick={() => setTab(id)}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
     </div>
   );
 }
