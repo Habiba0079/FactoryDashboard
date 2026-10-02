@@ -1,7 +1,7 @@
 // Service worker بسيط: بيخزّن الـ app shell بس.
 // طلبات الـ API (script.google.com) بتروح للشبكة دايمًا ومابتتخزنش،
 // عشان الحسابات تفضل دقيقة. مفيش offline للبيانات في الإصدار ده.
-const CACHE = "factory-accounts-v1";
+const CACHE = "factory-accounts-v2";
 const SHELL = ["/", "/manifest.webmanifest", "/favicon.svg", "/icons/icon-192.png", "/icons/icon-512.png"];
 
 self.addEventListener("install", (event) => {

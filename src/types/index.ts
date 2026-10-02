@@ -33,3 +33,16 @@ export interface Summary {
   totalPieces: number;
   totalFabricCm: number;
 }
+
+/** تسوية: الحساب اتقفل لحد التاريخ ده، والحساب الجديد بيبدأ من اليوم اللي بعده */
+export interface Settlement {
+  id: string;
+  date: string;
+  notes?: string;
+}
+
+export interface AllData {
+  models: Model[];
+  payments: Payment[];
+  settlements: Settlement[];
+}

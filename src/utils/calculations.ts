@@ -13,6 +13,8 @@ interface SummaryOptions {
   startModelId: string;
   endModelId: string | null;
   paymentsEndDate: string | null;
+  /** آخر يوم اتسوّى: اللي قبله وفيه مابيتحسبش (null = من غير تسوية) */
+  settledUpTo?: string | null;
 }
 
 /** الموديلات مترتبة بالتاريخ (نسخة جديدة، والأصلية ما بتتغيرش) */
@@ -26,9 +28,24 @@ export const sortModelsByDate = (models: Model[]): Model[] =>
 export function selectPeriod(
   models: Model[],
   payments: Payment[],
-  { startModelId, endModelId, paymentsEndDate }: SummaryOptions,
+  { startModelId, endModelId, paymentsEndDate, settledUpTo = null }: SummaryOptions,
 ): { periodModels: Model[]; periodPayments: Payment[] } {
-  const sorted = sortModelsByDate(models);
+  const afterSettlement = (date: string) =>
+    settledUpTo === null || date > settledUpTo;
+
+  const sorted = sortModelsByDate(models).filter((m) => afterSettlement(m.date));
+
+  const eligiblePayments = payments.filter(
+    (p) =>
+      afterSettlement(p.date) &&
+      (paymentsEndDate === null || p.date <= paymentsEndDate),
+  );
+
+  // مفيش موديلات (بعد التسوية مثلًا): الدفعات لوحدها بتتحسب، فالرصيد يبقى سالب
+  if (sorted.length === 0) {
+    return { periodModels: [], periodPayments: eligiblePayments };
+  }
+
   const startIndex = sorted.findIndex((m) => m.id === startModelId);
 
   const endIndex = endModelId
@@ -42,26 +59,12 @@ export function selectPeriod(
   const periodModels = sorted.slice(startIndex, endIndex + 1);
   const startDate = sorted[startIndex].date;
 
-  const periodPayments = payments.filter(
-    (p) =>
-      p.date >= startDate &&
-      (paymentsEndDate === null || p.date <= paymentsEndDate),
-  );
+  const periodPayments = eligiblePayments.filter((p) => p.date >= startDate);
 
   return { periodModels, periodPayments };
 }
 
-export function calculateSummary(
-  models: Model[],
-  payments: Payment[],
-  options: SummaryOptions,
-): Summary {
-  const { periodModels, periodPayments } = selectPeriod(
-    models,
-    payments,
-    options,
-  );
-
+function summarize(periodModels: Model[], periodPayments: Payment[]): Summary {
   const totalWork = periodModels.reduce(
     (sum, model) => sum + model.totalPrice,
     0,
@@ -86,6 +89,42 @@ export function calculateSummary(
     totalPieces,
     totalFabricCm,
   };
+}
+
+export function calculateSummary(
+  models: Model[],
+  payments: Payment[],
+  options: SummaryOptions,
+): Summary {
+  const { periodModels, periodPayments } = selectPeriod(
+    models,
+    payments,
+    options,
+  );
+  return summarize(periodModels, periodPayments);
+}
+
+/** حساب كل اللي بعد `after` ولحد `upTo` (شاملين)، بيستخدم لمعاينة التسوية */
+export function summarizeUpTo(
+  models: Model[],
+  payments: Payment[],
+  after: string | null,
+  upTo: string,
+): Summary {
+  const inRange = (date: string) =>
+    (after === null || date > after) && date <= upTo;
+
+  return summarize(
+    models.filter((m) => inRange(m.date)),
+    payments.filter((p) => inRange(p.date)),
+  );
+}
+
+/** "2026-06" ← "2026-06-30" */
+export function lastDayOfMonth(month: string): string {
+  const [year, monthNumber] = month.split("-").map(Number);
+  // اليوم 0 من الشهر اللي بعده = آخر يوم في الشهر ده
+  return fromUtcMs(Date.UTC(year, monthNumber, 0));
 }
 
 // ---------------------------------------------------------------- أسبوعي

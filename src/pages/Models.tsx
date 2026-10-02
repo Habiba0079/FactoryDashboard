@@ -1,13 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import ConfirmDialog from "../components/ConfirmDialog";
+import { ScissorsIcon } from "../components/icons";
 import Modal from "../components/Modal";
 import ModelForm from "../components/ModelForm";
-import {
-  createModel,
-  deleteModel,
-  getModels,
-  updateModel,
-} from "../services/api";
+import TableFilters from "../components/TableFilters";
+import { useData } from "../data/useData";
+import { createModel, deleteModel, updateModel } from "../services/api";
 import type { Model, NewModelData } from "../types";
 import {
   formatCurrency,
@@ -15,11 +13,18 @@ import {
   formatNumber,
   toDateInput,
 } from "../utils/format";
+import { PAGE_SIZE, compareNewest, matchesMonth } from "../utils/table";
 
 function Models() {
-  const [models, setModels] = useState<Model[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const {
+    models,
+    setModels,
+    loading,
+    hasData,
+    error,
+    refresh,
+    lastSettlementDate,
+  } = useData();
 
   // "new" = إضافة، Model = تعديل، null = الفورم مقفول
   const [editing, setEditing] = useState<Model | "new" | null>(null);
@@ -27,52 +32,42 @@ function Models() {
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [actionError, setActionError] = useState("");
 
-  const [reloadKey, setReloadKey] = useState(0);
+  const [search, setSearch] = useState("");
+  const [month, setMonth] = useState("");
+  const [limit, setLimit] = useState(PAGE_SIZE);
 
-  useEffect(() => {
-    let cancelled = false;
+  // الأحدث فوق + الفلتر
+  const filtered = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return [...models]
+      .sort(compareNewest)
+      .filter(
+        (m) =>
+          (!query || m.modelName.toLowerCase().includes(query)) &&
+          matchesMonth(m.date, month),
+      );
+  }, [models, search, month]);
 
-    async function run() {
-      try {
-        const data = await getModels();
-        if (cancelled) return;
-        setModels(data);
-        setError("");
-      } catch (err) {
-        console.error(err);
-        if (!cancelled) setError("حدث خطأ أثناء تحميل الموديلات");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
-
-    void run();
-    return () => {
-      cancelled = true;
-    };
-  }, [reloadKey]);
-
-  function retry() {
-    setLoading(true);
-    setError("");
-    setReloadKey((key) => key + 1);
-  }
-
-  // الأحدث فوق
-  const sorted = useMemo(() => {
-    return [...models].sort((a, b) =>
-      (a.modelName ?? "").localeCompare(b.modelName ?? ""),
-    );
-  }, [models]);
-
+  // الإجماليات على كل نتايج الفلتر (مش على أول ٥٠ بس)
   const totals = useMemo(
     () => ({
-      pieces: models.reduce((sum, m) => sum + m.quantity, 0),
-      price: models.reduce((sum, m) => sum + m.totalPrice, 0),
-      fabricCm: models.reduce((sum, m) => sum + m.totalFabricCm, 0),
+      pieces: filtered.reduce((sum, m) => sum + m.quantity, 0),
+      price: filtered.reduce((sum, m) => sum + m.totalPrice, 0),
+      fabricCm: filtered.reduce((sum, m) => sum + m.totalFabricCm, 0),
     }),
-    [models],
+    [filtered],
   );
+
+  const visible = filtered.slice(0, limit);
+
+  function changeSearch(value: string) {
+    setSearch(value);
+    setLimit(PAGE_SIZE);
+  }
+  function changeMonth(value: string) {
+    setMonth(value);
+    setLimit(PAGE_SIZE);
+  }
 
   async function handleSave(data: NewModelData) {
     if (editing && editing !== "new") {
@@ -115,19 +110,30 @@ function Models() {
 
       {loading ? (
         <p className="state">جاري تحميل الموديلات...</p>
-      ) : error ? (
+      ) : !hasData && error ? (
         <div className="state state-error">
           <p>{error}</p>
-          <button className="btn" onClick={retry}>
+          <button className="btn" onClick={refresh}>
             إعادة المحاولة
           </button>
         </div>
       ) : models.length === 0 ? (
-        <p className="state">
-          لا توجد موديلات حتى الآن. اضغط "إضافة موديل" للبدء.
-        </p>
+        <div className="state">
+          <ScissorsIcon size={44} />
+          <p>لا توجد موديلات حتى الآن. اضغطي "إضافة موديل" للبدء.</p>
+        </div>
       ) : (
         <>
+          <TableFilters
+            search={search}
+            onSearch={changeSearch}
+            month={month}
+            onMonth={changeMonth}
+            placeholder="ابحثي باسم الموديل"
+            shown={filtered.length}
+            total={models.length}
+          />
+
           <div className="totals">
             <div>
               <span>إجمالي القطع</span>
@@ -143,49 +149,70 @@ function Models() {
             </div>
           </div>
 
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>التاريخ</th>
-                  <th>الموديل</th>
-                  <th>القطع</th>
-                  <th>سعر القطعة</th>
-                  <th>المتراج/قطعة</th>
-                  <th>إجمالي السعر</th>
-                  <th>إجمالي المتراج</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {sorted.map((model) => (
-                  <tr key={model.id}>
-                    <td>{toDateInput(model.date)}</td>
-                    <td>{model.modelName}</td>
-                    <td>{formatNumber(model.quantity)}</td>
-                    <td>{formatCurrency(model.pricePerPiece)}</td>
-                    <td>{formatNumber(model.fabricCm)} سم</td>
-                    <td>{formatCurrency(model.totalPrice)}</td>
-                    <td>{formatMeters(model.totalFabricCm)}</td>
-                    <td className="row-actions">
-                      <button
-                        className="btn btn-sm"
-                        onClick={() => setEditing(model)}
-                      >
-                        تعديل
-                      </button>
-                      <button
-                        className="btn btn-sm btn-danger"
-                        onClick={() => setDeleting(model)}
-                      >
-                        حذف
-                      </button>
-                    </td>
+          {filtered.length === 0 ? (
+            <p className="state">مفيش موديلات مطابقة للفلتر.</p>
+          ) : (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>التاريخ</th>
+                    <th>الموديل</th>
+                    <th>القطع</th>
+                    <th>سعر القطعة</th>
+                    <th>المتراج/قطعة</th>
+                    <th>إجمالي السعر</th>
+                    <th>إجمالي المتراج</th>
+                    <th></th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {visible.map((model) => {
+                    const settled =
+                      lastSettlementDate !== null &&
+                      model.date <= lastSettlementDate;
+                    return (
+                      <tr key={model.id} className={settled ? "row-settled" : ""}>
+                        <td>
+                          {toDateInput(model.date)}
+                          {settled && <span className="badge">مسوّى</span>}
+                        </td>
+                        <td>{model.modelName}</td>
+                        <td>{formatNumber(model.quantity)}</td>
+                        <td>{formatCurrency(model.pricePerPiece)}</td>
+                        <td>{formatNumber(model.fabricCm)} سم</td>
+                        <td>{formatCurrency(model.totalPrice)}</td>
+                        <td>{formatMeters(model.totalFabricCm)}</td>
+                        <td className="row-actions">
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => setEditing(model)}
+                          >
+                            تعديل
+                          </button>
+                          <button
+                            className="btn btn-sm btn-danger"
+                            onClick={() => setDeleting(model)}
+                          >
+                            حذف
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {filtered.length > visible.length && (
+            <button
+              className="btn show-more"
+              onClick={() => setLimit((l) => l + PAGE_SIZE)}
+            >
+              عرض {PAGE_SIZE} أخرى ({filtered.length - visible.length} متبقي)
+            </button>
+          )}
         </>
       )}
 
@@ -205,7 +232,7 @@ function Models() {
       {deleting && (
         <ConfirmDialog
           title="حذف الموديل"
-          message={`متأكد إنك عايز تحذف موديل "${deleting.modelName}"؟ مش هتقدر ترجّعه.`}
+          message={`متأكدة إنك عايزة تحذفي موديل "${deleting.modelName}"؟ مش هتقدري ترجّعيه.`}
           busy={deleteBusy}
           onConfirm={handleDelete}
           onCancel={() => setDeleting(null)}

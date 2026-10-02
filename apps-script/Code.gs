@@ -1,197 +1,471 @@
-/**
- * Factory Accounts — Google Apps Script backend
- *
+const SPREADSHEET_ID = SpreadsheetApp.getActiveSpreadsheet().getId();
+
+/* ============================================================
+ * الـ API
  * القراءة : GET  ?action=models | payments | summary
- * الكتابة : POST (JSON كنص) { action, token, ...data }
- *           addModel / updateModel / deleteModel
- *           addPayment / updatePayment / deletePayment
+ * الكتابة : GET ?action=addModel&token=...&date=...  (أو POST بـ JSON)
+ *   addModel / updateModel / deleteModel
+ *   addPayment / updatePayment / deletePayment
  *
- * إعداد الـ token: Project Settings → Script properties → API_TOKEN
- * بعد أي تعديل: Deploy → Manage deployments → New version.
- */
+ * الـ token (اختياري لكن مُوصى به):
+ *   Project Settings → Script properties → API_TOKEN
+ * ============================================================ */
 
-const MODEL_HEADERS = ["id", "date", "modelName", "quantity", "pricePerPiece", "fabricCm", "totalPrice", "totalFabricCm"];
-const PAYMENT_HEADERS = ["id", "date", "amount", "notes"];
+const WRITE_ACTIONS = [
+  "addModel",
+  "updateModel",
+  "deleteModel",
+  "addPayment",
+  "updatePayment",
+  "deletePayment",
+  "addSettlement",
+  "deleteSettlement",
+];
 
-// لو السكريبت مش مربوط بالشيت (standalone) استبدلها بـ SpreadsheetApp.openById("ID")
-function getSpreadsheet_() {
-  return SpreadsheetApp.getActiveSpreadsheet();
-}
-
-function json_(obj) {
-  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
-}
-
-// ---------------------------------------------------------------- GET
 function doGet(e) {
+  const action = e.parameter.action;
+
+  if (action === "models") {
+    return getModels();
+  }
+
+  if (action === "payments") {
+    return getPayments();
+  }
+
+  if (action === "summary") {
+    return getSummary();
+  }
+
+  if (action === "settlements") {
+    return jsonResponse(readRows("Settlements"));
+  }
+
+  // طلب واحد بيجيب كل البيانات (أسرع من 3 طلبات منفصلة)
+  if (action === "all") {
+    return jsonResponse({
+      models: readRows("Models"),
+      payments: readRows("Payments"),
+      settlements: readRows("Settlements"),
+    });
+  }
+
+  // الكتابة: بتتقبل بس لو الـ token صح (شوفي handleWrite).
+  // بنستخدم GET لأن رد الـ POST في Apps Script بيوصل غلط للمتصفح عندنا.
+  if (WRITE_ACTIONS.indexOf(action) !== -1) {
+    return handleWrite(e.parameter);
+  }
+
+  return jsonResponse({
+    success: false,
+    message: "Invalid action",
+  });
+}
+
+/* ---------------------------------------------------------- القراءة */
+
+function getModels() {
+  return jsonResponse(readRows("Models"));
+}
+
+function getPayments() {
+  return jsonResponse(readRows("Payments"));
+}
+
+function getSummary() {
+  const models = readRows("Models");
+  const payments = readRows("Payments");
+
+  const totalWork = models.reduce(
+    (sum, model) => sum + Number(model.totalPrice || 0),
+    0
+  );
+
+  const totalPayments = payments.reduce(
+    (sum, payment) => sum + Number(payment.amount || 0),
+    0
+  );
+
+  const balance = totalWork - totalPayments;
+
+  return jsonResponse({
+    totalWork,
+    totalPayments,
+    balance,
+    totalPieces: models.reduce(
+      (sum, model) => sum + Number(model.quantity || 0),
+      0
+    ),
+    totalFabricCm: models.reduce(
+      (sum, model) => sum + Number(model.totalFabricCm || 0),
+      0
+    ),
+  });
+}
+
+function jsonResponse(data) {
+  return ContentService
+    .createTextOutput(JSON.stringify(data))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+/* ---------------------------------------------------------- الكتابة */
+
+function doPost(e) {
   try {
-    const action = e.parameter.action;
-    if (action === "models") return json_(readRows_("Models", MODEL_HEADERS));
-    if (action === "payments") return json_(readRows_("Payments", PAYMENT_HEADERS));
-    if (action === "summary") return json_(getSummary_());
-    return json_({ success: false, message: "Unknown action" });
-  } catch (err) {
-    return json_({ success: false, message: String(err) });
+    return handleWrite(JSON.parse(e.postData.contents));
+  } catch (error) {
+    return jsonResponse({ success: false, message: String(error) });
   }
 }
 
-// ---------------------------------------------------------------- POST
-function doPost(e) {
+// منطق الكتابة المشترك (GET و POST): token + lock + تنفيذ الـ action
+function handleWrite(body) {
   const lock = LockService.getScriptLock();
+
   try {
     lock.waitLock(10000);
-    const body = JSON.parse(e.postData.contents);
 
-    const expected = PropertiesService.getScriptProperties().getProperty("API_TOKEN");
+    // لو API_TOKEN متضبط في Script properties لازم يطابق اللي جاي من التطبيق
+    const expected = PropertiesService
+      .getScriptProperties()
+      .getProperty("API_TOKEN");
+
     if (expected && body.token !== expected) {
-      return json_({ success: false, message: "Unauthorized" });
+      return jsonResponse({ success: false, message: "Unauthorized" });
     }
 
     switch (body.action) {
-      case "addModel": return json_({ success: true, data: addModel_(body) });
-      case "updateModel": return json_({ success: true, data: updateModel_(body) });
-      case "deleteModel": return json_({ success: true, data: deleteRow_("Models", body.id) });
-      case "addPayment": return json_({ success: true, data: addPayment_(body) });
-      case "updatePayment": return json_({ success: true, data: updatePayment_(body) });
-      case "deletePayment": return json_({ success: true, data: deleteRow_("Payments", body.id) });
-      default: return json_({ success: false, message: "Unknown action" });
+      case "addModel":
+        return addModel(body);
+      case "updateModel":
+        return updateModel(body);
+      case "deleteModel":
+        return deleteRow("Models", body.id);
+      case "addPayment":
+        return addPayment(body);
+      case "updatePayment":
+        return updatePayment(body);
+      case "deletePayment":
+        return deleteRow("Payments", body.id);
+      case "addSettlement":
+        return addSettlement(body);
+      case "deleteSettlement":
+        return deleteRow("Settlements", body.id);
+      default:
+        return jsonResponse({ success: false, message: "Invalid action" });
     }
-  } catch (err) {
-    return json_({ success: false, message: String(err) });
+  } catch (error) {
+    return jsonResponse({ success: false, message: String(error) });
   } finally {
     lock.releaseLock();
   }
 }
 
-// ---------------------------------------------------------------- Models
-function cleanModel_(d) {
-  const quantity = Number(d.quantity);
-  const pricePerPiece = Number(d.pricePerPiece);
-  const fabricCm = Number(d.fabricCm);
-  if (!d.date) throw new Error("التاريخ مطلوب");
-  if (!String(d.modelName || "").trim()) throw new Error("اسم الموديل مطلوب");
-  if (!(quantity > 0)) throw new Error("عدد القطع لازم يكون أكبر من 0");
-  if (!(pricePerPiece > 0)) throw new Error("سعر القطعة لازم يكون أكبر من 0");
-  if (!(fabricCm > 0)) throw new Error("المتراج لازم يكون أكبر من 0");
+/* ---------------------------------------------------------- Models */
+
+// تحقق + حسابات الإجماليات (مكان واحد للإضافة والتعديل)
+function buildModel(data) {
+  const modelName = String(data.modelName || "").trim();
+  const date = String(data.date || "").slice(0, 10);
+  const quantity = Number(data.quantity);
+  const pricePerPiece = Number(data.pricePerPiece);
+  const fabricCm = Number(data.fabricCm);
+
+  if (
+    !modelName ||
+    !date ||
+    !(quantity > 0) ||
+    !(pricePerPiece > 0) ||
+    !(fabricCm > 0)
+  ) {
+    return null;
+  }
+
   return {
-    date: String(d.date).slice(0, 10),
-    modelName: String(d.modelName).trim(),
-    quantity: quantity,
-    pricePerPiece: pricePerPiece,
-    fabricCm: fabricCm,
+    date,
+    modelName,
+    quantity,
+    pricePerPiece,
+    fabricCm,
     totalPrice: quantity * pricePerPiece,
     totalFabricCm: quantity * fabricCm,
   };
 }
 
-function addModel_(d) {
-  const model = Object.assign({ id: Utilities.getUuid() }, cleanModel_(d));
-  appendRow_("Models", MODEL_HEADERS, model);
-  return model;
-}
+function addModel(data) {
+  const fields = buildModel(data);
 
-function updateModel_(d) {
-  const model = Object.assign({ id: d.id }, cleanModel_(d));
-  replaceRow_("Models", MODEL_HEADERS, model);
-  return model;
-}
-
-// ---------------------------------------------------------------- Payments
-function cleanPayment_(d) {
-  const amount = Number(d.amount);
-  if (!d.date) throw new Error("التاريخ مطلوب");
-  if (!(amount > 0)) throw new Error("قيمة الدفعة لازم تكون أكبر من 0");
-  return { date: String(d.date).slice(0, 10), amount: amount, notes: String(d.notes || "").trim() };
-}
-
-function addPayment_(d) {
-  const payment = Object.assign({ id: Utilities.getUuid() }, cleanPayment_(d));
-  appendRow_("Payments", PAYMENT_HEADERS, payment);
-  return payment;
-}
-
-function updatePayment_(d) {
-  const payment = Object.assign({ id: d.id }, cleanPayment_(d));
-  replaceRow_("Payments", PAYMENT_HEADERS, payment);
-  return payment;
-}
-
-// ---------------------------------------------------------------- Summary
-function getSummary_() {
-  const models = readRows_("Models", MODEL_HEADERS);
-  const payments = readRows_("Payments", PAYMENT_HEADERS);
-  const sum = function (rows, key) {
-    return rows.reduce(function (t, r) { return t + Number(r[key] || 0); }, 0);
-  };
-  const totalWork = sum(models, "totalPrice");
-  const totalPayments = sum(payments, "amount");
-  return {
-    totalWork: totalWork,
-    totalPayments: totalPayments,
-    balance: totalWork - totalPayments,
-    totalPieces: sum(models, "quantity"),
-    totalFabricCm: sum(models, "totalFabricCm"),
-  };
-}
-
-// ---------------------------------------------------------------- Sheet helpers
-function sheet_(name) {
-  const s = getSpreadsheet_().getSheetByName(name);
-  if (!s) throw new Error("Sheet not found: " + name);
-  return s;
-}
-
-function normalize_(value) {
-  if (value instanceof Date) {
-    return Utilities.formatDate(value, Session.getScriptTimeZone(), "yyyy-MM-dd");
+  if (!fields) {
+    return jsonResponse({
+      success: false,
+      message: "Missing or invalid model data",
+    });
   }
+
+  const model = Object.assign({ id: `M-${Date.now()}` }, fields);
+
+  appendRowByHeaders("Models", model);
+
+  return jsonResponse({ success: true, data: model });
+}
+
+function updateModel(data) {
+  const fields = buildModel(data);
+
+  if (!fields) {
+    return jsonResponse({
+      success: false,
+      message: "Missing or invalid model data",
+    });
+  }
+
+  const model = Object.assign({ id: data.id }, fields);
+
+  if (!updateRowById("Models", model)) {
+    return jsonResponse({ success: false, message: "Model not found" });
+  }
+
+  return jsonResponse({ success: true, data: model });
+}
+
+/* ---------------------------------------------------------- Payments */
+
+function buildPayment(data) {
+  const amount = Number(data.amount);
+  const date = String(data.date || "").slice(0, 10);
+  const notes = String(data.notes || "").trim();
+
+  if (!date || !(amount > 0)) {
+    return null;
+  }
+
+  return { date, amount, notes };
+}
+
+function addPayment(data) {
+  const fields = buildPayment(data);
+
+  if (!fields) {
+    return jsonResponse({
+      success: false,
+      message: "Missing or invalid payment data",
+    });
+  }
+
+  const payment = Object.assign({ id: `P-${Date.now()}` }, fields);
+
+  appendRowByHeaders("Payments", payment);
+
+  return jsonResponse({ success: true, data: payment });
+}
+
+function updatePayment(data) {
+  const fields = buildPayment(data);
+
+  if (!fields) {
+    return jsonResponse({
+      success: false,
+      message: "Missing or invalid payment data",
+    });
+  }
+
+  const payment = Object.assign({ id: data.id }, fields);
+
+  if (!updateRowById("Payments", payment)) {
+    return jsonResponse({ success: false, message: "Payment not found" });
+  }
+
+  return jsonResponse({ success: true, data: payment });
+}
+
+/* ---------------------------------------------------------- Settlements */
+
+// تسوية = "الحساب اتقفل لحد التاريخ ده"، والتطبيق بيبدأ يحسب من اليوم اللي بعده
+function addSettlement(data) {
+  const date = String(data.date || "").slice(0, 10);
+  const notes = String(data.notes || "").trim();
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return jsonResponse({
+      success: false,
+      message: "Missing or invalid settlement date",
+    });
+  }
+
+  const settlement = { id: `S-${Date.now()}`, date, notes };
+
+  appendRowByHeaders("Settlements", settlement);
+
+  return jsonResponse({ success: true, data: settlement });
+}
+
+/* ---------------------------------------------------------- Helpers */
+
+// شيت التسويات بيتعمل لوحده أول مرة لو مش موجود
+const SHEET_HEADERS = {
+  Settlements: ["id", "date", "notes"],
+};
+
+// بنفتح الشيت وبنجيب التوقيت مرة واحدة بس في كل طلب (كانت بتتكرر مع كل صف)
+let cachedSpreadsheet = null;
+let cachedTimeZone = null;
+
+function getSpreadsheet() {
+  if (!cachedSpreadsheet) {
+    cachedSpreadsheet = SpreadsheetApp.openById(SPREADSHEET_ID);
+  }
+  return cachedSpreadsheet;
+}
+
+function getTimeZone() {
+  if (!cachedTimeZone) {
+    cachedTimeZone = getSpreadsheet().getSpreadsheetTimeZone();
+  }
+  return cachedTimeZone;
+}
+
+// الشيت عندك أسماء أعمدته (ID, Model, TotalFabric...) مختلفة عن اللي التطبيق بيفهمه،
+// فبنترجمها هنا. الحروف الكبيرة والصغيرة والمسافات مابتفرقش.
+const HEADER_ALIASES = {
+  id: "id",
+  date: "date",
+  model: "modelName",
+  modelname: "modelName",
+  quantity: "quantity",
+  priceperpiece: "pricePerPiece",
+  fabriccm: "fabricCm",
+  totalprice: "totalPrice",
+  totalfabric: "totalFabricCm",
+  totalfabriccm: "totalFabricCm",
+  amount: "amount",
+  notes: "notes",
+};
+
+function canonicalHeader(header) {
+  const key = String(header).toLowerCase().replace(/[^a-z]/g, "");
+  return HEADER_ALIASES[key] || String(header);
+}
+
+function getHeaders(sheet) {
+  return sheet
+    .getRange(1, 1, 1, sheet.getLastColumn())
+    .getValues()[0]
+    .map(canonicalHeader);
+}
+
+function getSheet(name) {
+  const spreadsheet = getSpreadsheet();
+  let sheet = spreadsheet.getSheetByName(name);
+
+  if (!sheet && SHEET_HEADERS[name]) {
+    sheet = spreadsheet.insertSheet(name);
+    sheet.appendRow(SHEET_HEADERS[name]);
+  }
+
+  return sheet;
+}
+
+// الشيت بيحول التواريخ لـ Date، و JSON.stringify بيحولها UTC،
+// وده بيطلّع التاريخ يوم قبل (توقيت مصر +2/+3). فبنرجّعها yyyy-MM-dd بتوقيت الشيت.
+function normalizeValue(value) {
+  if (value instanceof Date) {
+    return Utilities.formatDate(value, getTimeZone(), "yyyy-MM-dd");
+  }
+
   return value;
 }
 
-function readRows_(name, headers) {
-  const s = sheet_(name);
-  const last = s.getLastRow();
-  if (last < 2) return [];
-  const values = s.getRange(2, 1, last - 1, headers.length).getValues();
-  return values
-    .filter(function (row) { return row[0] !== ""; })
-    .map(function (row) {
-      const obj = {};
-      headers.forEach(function (h, i) { obj[h] = normalize_(row[i]); });
-      return obj;
+function readRows(name) {
+  const sheet = getSheet(name);
+  const data = sheet.getDataRange().getValues();
+
+  if (data.length <= 1) {
+    return [];
+  }
+
+  const headers = data[0].map(canonicalHeader);
+  const rows = data.slice(1);
+
+  return rows
+    .filter(row => row[0] !== "")
+    .map(row => {
+      const item = {};
+
+      headers.forEach((header, index) => {
+        item[header] = normalizeValue(row[index]);
+      });
+
+      return item;
     });
 }
 
-function toRow_(headers, obj) {
-  return headers.map(function (h) { return obj[h] === undefined ? "" : obj[h]; });
+// بنكتب حسب أسماء الأعمدة في الصف الأول، فترتيب الأعمدة مايفرقش
+function rowFromHeaders(headers, item) {
+  return headers.map(header =>
+    item[header] === undefined ? "" : item[header]
+  );
 }
 
-function appendRow_(name, headers, obj) {
-  sheet_(name).appendRow(toRow_(headers, obj));
+function appendRowByHeaders(name, item) {
+  const sheet = getSheet(name);
+  const headers = getHeaders(sheet);
+
+  sheet.appendRow(rowFromHeaders(headers, item));
 }
 
-// بندوّر على الصف بالـ id (مش برقم الصف) عشان الحذف مايبوظش الترتيب
-function findRow_(s, id) {
-  const last = s.getLastRow();
-  if (last < 2 || !id) return -1;
-  const ids = s.getRange(2, 1, last - 1, 1).getValues();
-  for (let i = 0; i < ids.length; i++) {
-    if (String(ids[i][0]) === String(id)) return i + 2;
+// بندوّر على الصف بالـ id (مش برقم الصف) عشان الحذف مايبوظش الباقي
+function findRowById(sheet, id) {
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < 2 || !id) {
+    return -1;
   }
+
+  const headers = getHeaders(sheet);
+  const idColumn = headers.indexOf("id") + 1;
+
+  if (idColumn === 0) {
+    return -1;
+  }
+
+  const ids = sheet.getRange(2, idColumn, lastRow - 1, 1).getValues();
+
+  for (let i = 0; i < ids.length; i++) {
+    if (String(ids[i][0]) === String(id)) {
+      return i + 2;
+    }
+  }
+
   return -1;
 }
 
-function replaceRow_(name, headers, obj) {
-  const s = sheet_(name);
-  const row = findRow_(s, obj.id);
-  if (row === -1) throw new Error("السجل غير موجود");
-  s.getRange(row, 1, 1, headers.length).setValues([toRow_(headers, obj)]);
+function updateRowById(name, item) {
+  const sheet = getSheet(name);
+  const rowNumber = findRowById(sheet, item.id);
+
+  if (rowNumber === -1) {
+    return false;
+  }
+
+  const headers = getHeaders(sheet);
+
+  sheet
+    .getRange(rowNumber, 1, 1, headers.length)
+    .setValues([rowFromHeaders(headers, item)]);
+
+  return true;
 }
 
-function deleteRow_(name, id) {
-  const s = sheet_(name);
-  const row = findRow_(s, id);
-  if (row === -1) throw new Error("السجل غير موجود");
-  s.deleteRow(row);
-  return { id: id };
+function deleteRow(name, id) {
+  const sheet = getSheet(name);
+  const rowNumber = findRowById(sheet, id);
+
+  if (rowNumber === -1) {
+    return jsonResponse({ success: false, message: "Record not found" });
+  }
+
+  sheet.deleteRow(rowNumber);
+
+  return jsonResponse({ success: true, data: { id } });
 }

@@ -1,8 +1,10 @@
 import type {
+  AllData,
   Model,
   NewModelData,
   NewPaymentData,
   Payment,
+  Settlement,
   Summary,
 } from "../types";
 
@@ -28,15 +30,20 @@ async function get<T>(action: string): Promise<T> {
 }
 
 /**
- * الكتابة: POST.
- * بنبعت Content-Type: text/plain عشان الطلب يبقى "simple request"
- * ومايحصلش CORS preflight (Apps Script مابيدعمش OPTIONS).
+ * الكتابة: بنبعتها GET مع الـ token.
+ * (جربنا POST، بس رد الـ Apps Script بعد الـ redirect كان بيوصل غلط
+ *  فالتطبيق كان بيظهر خطأ رغم إن الصف بيتسجل في الشيت.)
+ * الـ fetch هنا مايتكررش لوحده، و cache: "no-store" بيمنع الكاش.
  */
 async function post<T>(action: string, payload: object): Promise<T> {
-  const response = await fetch(API_URL, {
-    method: "POST",
-    headers: { "Content-Type": "text/plain;charset=utf-8" },
-    body: JSON.stringify({ action, token: API_TOKEN, ...payload }),
+  const params = new URLSearchParams({ action, token: API_TOKEN });
+
+  Object.entries(payload).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) params.set(key, String(value));
+  });
+
+  const response = await fetch(`${API_URL}?${params.toString()}`, {
+    cache: "no-store",
   });
 
   if (!response.ok) throw new Error(`Request failed: ${action}`);
@@ -51,6 +58,8 @@ async function post<T>(action: string, payload: object): Promise<T> {
 }
 
 // ---------- Read ----------
+/** طلب واحد بيجيب الموديلات والدفعات والتسويات (أسرع من 3 طلبات) */
+export const getAll = () => get<AllData>("all");
 export const getModels = () => get<Model[]>("models");
 export const getPayments = () => get<Payment[]>("payments");
 export const getSummary = () => get<Summary>("summary");
@@ -74,3 +83,10 @@ export const updatePayment = (id: string, data: NewPaymentData) =>
 
 export const deletePayment = (id: string) =>
   post<{ id: string }>("deletePayment", { id });
+
+// ---------- Settlements ----------
+export const createSettlement = (data: { date: string; notes?: string }) =>
+  post<Settlement>("addSettlement", data);
+
+export const deleteSettlement = (id: string) =>
+  post<{ id: string }>("deleteSettlement", { id });

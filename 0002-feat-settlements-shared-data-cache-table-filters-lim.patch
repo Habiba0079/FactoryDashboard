@@ -1,0 +1,2256 @@
+From 91a1c0869fa56f5c2b84afb1c7442ea50060707f Mon Sep 17 00:00:00 2001
+From: Habiba <dev@example.com>
+Date: Fri, 2 Oct 2026 18:07:49 +0000
+Subject: [PATCH] feat: settlements, shared data cache, table filters/limit,
+ garment theme
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- settlement (تسوية): close the account up to a month, count only what's after it
+- one shared data store with local cache: instant open, background refresh
+- Apps Script: single 'all' request, spreadsheet/timezone opened once per request (was once per date cell), auto-created Settlements sheet
+- Models/Payments: newest first, search + month filter, first 50 rows + show more
+- dashboard: last 7 weeks in the chart, removed total fabric card
+- garment theme: scissors/spool/mannequin icons, stitched borders, new app icon
+---
+ apps-script/Code.gs                |  81 ++++++++-
+ public/favicon.svg                 |  11 +-
+ public/icons/icon-192.png          | Bin 783 -> 2059 bytes
+ public/icons/icon-512.png          | Bin 2605 -> 6282 bytes
+ public/icons/icon-maskable-512.png | Bin 2521 -> 5848 bytes
+ public/sw.js                       |   2 +-
+ src/App.tsx                        |  63 ++++---
+ src/components/SettlementModal.tsx | 125 ++++++++++++++
+ src/components/TableFilters.tsx    |  58 +++++++
+ src/components/icons.tsx           |  67 ++++++++
+ src/data/DataProvider.tsx          | 127 ++++++++++++++
+ src/data/dataContext.ts            |  24 +++
+ src/data/useData.ts                |   8 +
+ src/index.css                      | 107 ++++++++++++
+ src/pages/Dashboard.tsx            | 256 +++++++++++++++++++++--------
+ src/pages/Models.tsx               | 227 ++++++++++++++-----------
+ src/pages/Payments.tsx             | 197 +++++++++++++---------
+ src/services/api.ts                |  11 ++
+ src/types/index.ts                 |  13 ++
+ src/utils/calculations.ts          |  75 +++++++--
+ src/utils/table.ts                 |  12 ++
+ 21 files changed, 1162 insertions(+), 302 deletions(-)
+ create mode 100644 src/components/SettlementModal.tsx
+ create mode 100644 src/components/TableFilters.tsx
+ create mode 100644 src/components/icons.tsx
+ create mode 100644 src/data/DataProvider.tsx
+ create mode 100644 src/data/dataContext.ts
+ create mode 100644 src/data/useData.ts
+ create mode 100644 src/utils/table.ts
+
+diff --git a/apps-script/Code.gs b/apps-script/Code.gs
+index fad0755..ea5d912 100644
+--- a/apps-script/Code.gs
++++ b/apps-script/Code.gs
+@@ -18,6 +18,8 @@ const WRITE_ACTIONS = [
+   "addPayment",
+   "updatePayment",
+   "deletePayment",
++  "addSettlement",
++  "deleteSettlement",
+ ];
+ 
+ function doGet(e) {
+@@ -35,6 +37,19 @@ function doGet(e) {
+     return getSummary();
+   }
+ 
++  if (action === "settlements") {
++    return jsonResponse(readRows("Settlements"));
++  }
++
++  // طلب واحد بيجيب كل البيانات (أسرع من 3 طلبات منفصلة)
++  if (action === "all") {
++    return jsonResponse({
++      models: readRows("Models"),
++      payments: readRows("Payments"),
++      settlements: readRows("Settlements"),
++    });
++  }
++
+   // الكتابة: بتتقبل بس لو الـ token صح (شوفي handleWrite).
+   // بنستخدم GET لأن رد الـ POST في Apps Script بيوصل غلط للمتصفح عندنا.
+   if (WRITE_ACTIONS.indexOf(action) !== -1) {
+@@ -133,6 +148,10 @@ function handleWrite(body) {
+         return updatePayment(body);
+       case "deletePayment":
+         return deleteRow("Payments", body.id);
++      case "addSettlement":
++        return addSettlement(body);
++      case "deleteSettlement":
++        return deleteRow("Settlements", body.id);
+       default:
+         return jsonResponse({ success: false, message: "Invalid action" });
+     }
+@@ -260,8 +279,52 @@ function updatePayment(data) {
+   return jsonResponse({ success: true, data: payment });
+ }
+ 
++/* ---------------------------------------------------------- Settlements */
++
++// تسوية = "الحساب اتقفل لحد التاريخ ده"، والتطبيق بيبدأ يحسب من اليوم اللي بعده
++function addSettlement(data) {
++  const date = String(data.date || "").slice(0, 10);
++  const notes = String(data.notes || "").trim();
++
++  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
++    return jsonResponse({
++      success: false,
++      message: "Missing or invalid settlement date",
++    });
++  }
++
++  const settlement = { id: `S-${Date.now()}`, date, notes };
++
++  appendRowByHeaders("Settlements", settlement);
++
++  return jsonResponse({ success: true, data: settlement });
++}
++
+ /* ---------------------------------------------------------- Helpers */
+ 
++// شيت التسويات بيتعمل لوحده أول مرة لو مش موجود
++const SHEET_HEADERS = {
++  Settlements: ["id", "date", "notes"],
++};
++
++// بنفتح الشيت وبنجيب التوقيت مرة واحدة بس في كل طلب (كانت بتتكرر مع كل صف)
++let cachedSpreadsheet = null;
++let cachedTimeZone = null;
++
++function getSpreadsheet() {
++  if (!cachedSpreadsheet) {
++    cachedSpreadsheet = SpreadsheetApp.openById(SPREADSHEET_ID);
++  }
++  return cachedSpreadsheet;
++}
++
++function getTimeZone() {
++  if (!cachedTimeZone) {
++    cachedTimeZone = getSpreadsheet().getSpreadsheetTimeZone();
++  }
++  return cachedTimeZone;
++}
++
+ // الشيت عندك أسماء أعمدته (ID, Model, TotalFabric...) مختلفة عن اللي التطبيق بيفهمه،
+ // فبنترجمها هنا. الحروف الكبيرة والصغيرة والمسافات مابتفرقش.
+ const HEADER_ALIASES = {
+@@ -292,20 +355,22 @@ function getHeaders(sheet) {
+ }
+ 
+ function getSheet(name) {
+-  return SpreadsheetApp
+-    .openById(SPREADSHEET_ID)
+-    .getSheetByName(name);
++  const spreadsheet = getSpreadsheet();
++  let sheet = spreadsheet.getSheetByName(name);
++
++  if (!sheet && SHEET_HEADERS[name]) {
++    sheet = spreadsheet.insertSheet(name);
++    sheet.appendRow(SHEET_HEADERS[name]);
++  }
++
++  return sheet;
+ }
+ 
+ // الشيت بيحول التواريخ لـ Date، و JSON.stringify بيحولها UTC،
+ // وده بيطلّع التاريخ يوم قبل (توقيت مصر +2/+3). فبنرجّعها yyyy-MM-dd بتوقيت الشيت.
+ function normalizeValue(value) {
+   if (value instanceof Date) {
+-    const tz = SpreadsheetApp
+-      .openById(SPREADSHEET_ID)
+-      .getSpreadsheetTimeZone();
+-
+-    return Utilities.formatDate(value, tz, "yyyy-MM-dd");
++    return Utilities.formatDate(value, getTimeZone(), "yyyy-MM-dd");
+   }
+ 
+   return value;
+diff --git a/public/favicon.svg b/public/favicon.svg
+index 6893eb1..b6ff24f 100644
+--- a/public/favicon.svg
++++ b/public/favicon.svg
+@@ -1 +1,10 @@
+-<svg xmlns="http://www.w3.org/2000/svg" width="48" height="46" fill="none" viewBox="0 0 48 46"><path fill="#863bff" d="M25.946 44.938c-.664.845-2.021.375-2.021-.698V33.937a2.26 2.26 0 0 0-2.262-2.262H10.287c-.92 0-1.456-1.04-.92-1.788l7.48-10.471c1.07-1.497 0-3.578-1.842-3.578H1.237c-.92 0-1.456-1.04-.92-1.788L10.013.474c.214-.297.556-.474.92-.474h28.894c.92 0 1.456 1.04.92 1.788l-7.48 10.471c-1.07 1.498 0 3.579 1.842 3.579h11.377c.943 0 1.473 1.088.89 1.83L25.947 44.94z" style="fill:#863bff;fill:color(display-p3 .5252 .23 1);fill-opacity:1"/><mask id="a" width="48" height="46" x="0" y="0" maskUnits="userSpaceOnUse" style="mask-type:alpha"><path fill="#000" d="M25.842 44.938c-.664.844-2.021.375-2.021-.698V33.937a2.26 2.26 0 0 0-2.262-2.262H10.183c-.92 0-1.456-1.04-.92-1.788l7.48-10.471c1.07-1.498 0-3.579-1.842-3.579H1.133c-.92 0-1.456-1.04-.92-1.787L9.91.473c.214-.297.556-.474.92-.474h28.894c.92 0 1.456 1.04.92 1.788l-7.48 10.471c-1.07 1.498 0 3.578 1.842 3.578h11.377c.943 0 1.473 1.088.89 1.832L25.843 44.94z" style="fill:#000;fill-opacity:1"/></mask><g mask="url(#a)"><g filter="url(#b)"><ellipse cx="5.508" cy="14.704" fill="#ede6ff" rx="5.508" ry="14.704" style="fill:#ede6ff;fill:color(display-p3 .9275 .9033 1);fill-opacity:1" transform="matrix(.00324 1 1 -.00324 -4.47 31.516)"/></g><g filter="url(#c)"><ellipse cx="10.399" cy="29.851" fill="#ede6ff" rx="10.399" ry="29.851" style="fill:#ede6ff;fill:color(display-p3 .9275 .9033 1);fill-opacity:1" transform="matrix(.00324 1 1 -.00324 -39.328 7.883)"/></g><g filter="url(#d)"><ellipse cx="5.508" cy="30.487" fill="#7e14ff" rx="5.508" ry="30.487" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(89.814 -25.913 -14.639)scale(1 -1)"/></g><g filter="url(#e)"><ellipse cx="5.508" cy="30.599" fill="#7e14ff" rx="5.508" ry="30.599" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(89.814 -32.644 -3.334)scale(1 -1)"/></g><g filter="url(#f)"><ellipse cx="5.508" cy="30.599" fill="#7e14ff" rx="5.508" ry="30.599" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="matrix(.00324 1 1 -.00324 -34.34 30.47)"/></g><g filter="url(#g)"><ellipse cx="14.072" cy="22.078" fill="#ede6ff" rx="14.072" ry="22.078" style="fill:#ede6ff;fill:color(display-p3 .9275 .9033 1);fill-opacity:1" transform="rotate(93.35 24.506 48.493)scale(-1 1)"/></g><g filter="url(#h)"><ellipse cx="3.47" cy="21.501" fill="#7e14ff" rx="3.47" ry="21.501" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(89.009 28.708 47.59)scale(-1 1)"/></g><g filter="url(#i)"><ellipse cx="3.47" cy="21.501" fill="#7e14ff" rx="3.47" ry="21.501" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(89.009 28.708 47.59)scale(-1 1)"/></g><g filter="url(#j)"><ellipse cx=".387" cy="8.972" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(39.51 .387 8.972)"/></g><g filter="url(#k)"><ellipse cx="47.523" cy="-6.092" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(37.892 47.523 -6.092)"/></g><g filter="url(#l)"><ellipse cx="41.412" cy="6.333" fill="#47bfff" rx="5.971" ry="9.665" style="fill:#47bfff;fill:color(display-p3 .2799 .748 1);fill-opacity:1" transform="rotate(37.892 41.412 6.333)"/></g><g filter="url(#m)"><ellipse cx="-1.879" cy="38.332" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(37.892 -1.88 38.332)"/></g><g filter="url(#n)"><ellipse cx="-1.879" cy="38.332" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(37.892 -1.88 38.332)"/></g><g filter="url(#o)"><ellipse cx="35.651" cy="29.907" fill="#7e14ff" rx="4.407" ry="29.108" style="fill:#7e14ff;fill:color(display-p3 .4922 .0767 1);fill-opacity:1" transform="rotate(37.892 35.651 29.907)"/></g><g filter="url(#p)"><ellipse cx="38.418" cy="32.4" fill="#47bfff" rx="5.971" ry="15.297" style="fill:#47bfff;fill:color(display-p3 .2799 .748 1);fill-opacity:1" transform="rotate(37.892 38.418 32.4)"/></g></g><defs><filter id="b" width="60.045" height="41.654" x="-19.77" y="16.149" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="7.659"/></filter><filter id="c" width="90.34" height="51.437" x="-54.613" y="-7.533" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="7.659"/></filter><filter id="d" width="79.355" height="29.4" x="-49.64" y="2.03" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="e" width="79.579" height="29.4" x="-45.045" y="20.029" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="f" width="79.579" height="29.4" x="-43.513" y="21.178" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="g" width="74.749" height="58.852" x="15.756" y="-17.901" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="7.659"/></filter><filter id="h" width="61.377" height="25.362" x="23.548" y="2.284" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="i" width="61.377" height="25.362" x="23.548" y="2.284" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="j" width="56.045" height="63.649" x="-27.636" y="-22.853" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="k" width="54.814" height="64.646" x="20.116" y="-38.415" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="l" width="33.541" height="35.313" x="24.641" y="-11.323" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="m" width="54.814" height="64.646" x="-29.286" y="6.009" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="n" width="54.814" height="64.646" x="-29.286" y="6.009" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="o" width="54.814" height="64.646" x="8.244" y="-2.416" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter><filter id="p" width="39.409" height="43.623" x="18.713" y="10.588" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur result="effect1_foregroundBlur_2002_17158" stdDeviation="4.596"/></filter></defs></svg>
+\ No newline at end of file
++<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
++  <rect width="512" height="512" rx="96" fill="#0f766e"/>
++  <circle cx="256" cy="256" r="224" fill="none" stroke="#fff" stroke-opacity=".8" stroke-width="8" stroke-dasharray="22 20"/>
++  <g fill="none" stroke="#fff" stroke-width="26" stroke-linecap="round">
++    <circle cx="184" cy="366" r="52"/>
++    <circle cx="328" cy="366" r="52"/>
++    <path d="M218 328 361 106M294 328 151 106"/>
++  </g>
++  <circle cx="256" cy="276" r="12" fill="#fff"/>
++</svg>
+diff --git a/public/icons/icon-192.png b/public/icons/icon-192.png
+index bb508469022b78d0f9fd6f0b9e6cf7298b39e805..8bf66a16a4e1cbb0a517b0740e21f25e372e20c1 100644
+GIT binary patch
+literal 2059
+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
+RvGU{r_q|?}2fLXm{{XEejjI3v
+
+literal 783
+zcmeAS@N?(olHy`uVBq!ia0vp^2SAvE4M+yv$zf+;V7lh%;uumf=j~m?yvGJ24vv;L
+z?o|gZ|2$7IHE))*MQFp8*%KzcFfV49$vR)-@Q3S9tM=QPbyQhaF&3yWPEcdG#NsfE
+z!9$oKlS#psVF_o0$>0;*V(+fsP+PlaFaPdq_v_amUROHh^w+v-nY|p}42wS3Z!hAI
+zYg9_h{de>FJYNRJ>YNLq$^zv0r?^o~@~`^GsqX!AW(p@XNeT<u-Mcq^?w*1)CW)MH
+zYN7`tm?SdRpVe$CBs0uxk0z{{7%arIAS?18i-fJx5r$RMmNL)S8R&XpLk>fAPJp1z
+z{#51$K{Aa;iM(jD2HRsZ{=ZLuV;c3h=XF%+nm?Nu4{&(18+=~(`EvI8eZun!V^`n%
+zyFK@|-u2&a3%@AUz3$2HkhBG>u6$fy*~Rc+`LsHgru#w+nak_Fms}TF`~J**(K(1z
+j@`ul1mM~3H%ohJ!cY>?_Pn28%Oy~@ru6{1-oD!M<yxIYU
+
+diff --git a/public/icons/icon-512.png b/public/icons/icon-512.png
+index c655b9603a523918e87c724e837ba3d14a6fc708..b77fc134712e2c270004651a1db98246041fd583 100644
+GIT binary patch
+literal 6282
+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
+C%5?bv
+
+literal 2605
+zcmeAS@N?(olHy`uVBq!ia0y~yU;;9k7&zE~)R&4YzZe)ezj(ShhE&XXd&kjF+EKva
+zqGA%idaLZ5gWmVAm@9CzpX53s*mA-4?|o~>s}W_j%#WVEd-*VxnIWjIM~;EvM;*|>
+zCKd(;7ET5R4j~2x0Tl)Y1rG)WhY1V}4GN454347;M#EvKq=yS{UobL!ds1T2C-?C3
+zyZQ3&{Rdp~-p!MXbK_?;*la8R_d5sUHeUvYn60-y?pI;C^@o??fc%=8KihNv{@vln
+zz_4d=k&Jfrr)j{9;rmwO+P9}ZK(#C64!^pW%Ea(M+<k%&Bg27hxlAkEAR%(2=6CH=
+z%My;^op-h`W@lJuE!(%){l}Ky&yQbJW~f(SNN}pQ`!zl8y8x4c{C=i}lWU6p=+EUl
+zuKK;nR+zzH;?@2quYMn#$H6ee<*7y3x0ain3^N=+LE0+G$sn<&if488VI39*o+lhk
+zi#Zq)Bp6v9LqgG@BY%JTJmwz7;av{h?UQTxIfoAzm^HWlet!HykfF?xVMFfief|HI
+zUbk&wI8a*0dcf%T|4T0mVv6(|)+;eQ3bUWI`aS!HNG63fpj66K)56fPO7`fjeGK)=
+z3{9(!Z`fsipqj;@N15ZmHco~l7J&mZ!DYC>qucLiK4(w>2B_yy$;bm&`zU@t-@n*>
+z#vz^aiPJ3IW<Rw&V{|-Yo^v}SD1+DkzWHr_?!5PAxBqQE`}yvx-`63@*7548`K9k8
+zpZ~g_cDMT4&VSoMMTWwvZ)x*u@85j>J8ScM>)$o;Yq#mA1EcTLviqm!RnPn!|2Fmf
+z-ZMYfYk`WKj_AK<_iz9E&FsDV+uZ$o&;AZv{r-5VdAUEo{^IrozU7Atzi`B-wep*-
+zKOVD3ZjBqmhhy{XUxfWh_*`}7=<9=8pi2CwG@+6Rl<xX(ey&$!zV>`S@4NQ-B&7(b
+pYZw^zO(#v`Xd{A}jfgs?e~-3*u~)C$0c-{`c)I$ztaD0e0ssjS?9>1N
+
+diff --git a/public/icons/icon-maskable-512.png b/public/icons/icon-maskable-512.png
+index 7e194fafeff229e47313613656f5ec311f18dc7a..315cb2c0cebc05182fed85fcd69cc30508cd5264 100644
+GIT binary patch
+literal 5848
+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
+YyZYy18x3Xfjy3GJwztaL=k||(0ja`r?*IS*
+
+literal 2521
+zcmeAS@N?(olHy`uVBq!ia0y~yU;;9k7&zE~)R&4YzZe)e7kIijhE&XXd)GGTj)R2j
+z#e=SV+O0g-98UP%Wb8X2vhAR~!}sOY=a?>NvtABgJnPY$N6%h;WMNoR6K%`D@S_T7
+zU=s@i0}Ceu1BVa;gMbPHgMtSGgTn*{h6V*j1_sAb1*73GnjQp7_Ej+)NUzwjJKpx;
+z&8Kg_zT*5ad2{#d)yJ<YGuWN-WB;G+)G)V#l|km%x%U4rxBRz@VqqxY2<E%4X>Do8
+z$k1c{Hel|y>B&M22Qq^BFR$Ef$p^_?64}3kzkK<7Ms2X?JF9qGh9Bnq<=<DU+w9)6
+zH_n#vhc^>L+s&5`>OXDq<TxM`$9O=&TJE3z+kN~$92pJ>fc?JEkKq8rWxlJK)eAis
+z4m?{Xw=B5axfN2jNYDN!Vq0r3Gjp&PH7{zuGW?j^zWeu8;d!z5;?~b&_^^<L;Wo_c
+z4DJs_8KQ4~{7|3yy_TWgi(x~rX8Y?Ya~bjl8FCVDEwswjKakDT@D%KM<~e@A5_J*_
+zgST&e*Svl5FNSNOdmw1~_Uo(F|4cuB@BP0ue}B)<{Z*GH46b1!@?HgB2!C5v|82)P
+z_u0E<KNbLmQ~Sg4_oemUcHR3w3!G7Ml25fiS~d6G`FYp>MhBM_)i5=zee>_(j;i~w
+zUhhx;y6@`s`t$F8XISpuv9l`1mZ|RP!*_LGThguT3U=G)7uP??1=U=8n6Ol1z@*%e
+zeDme<@B))MzZ34CcnQ^if2<Q2I0!2ntw%?j3+QE8E&IK=&TDgi$GQWXYz&^RelF{r
+G5}E*rth3<&
+
+diff --git a/public/sw.js b/public/sw.js
+index 8085786..da6ac60 100644
+--- a/public/sw.js
++++ b/public/sw.js
+@@ -1,7 +1,7 @@
+ // Service worker بسيط: بيخزّن الـ app shell بس.
+ // طلبات الـ API (script.google.com) بتروح للشبكة دايمًا ومابتتخزنش،
+ // عشان الحسابات تفضل دقيقة. مفيش offline للبيانات في الإصدار ده.
+-const CACHE = "factory-accounts-v1";
++const CACHE = "factory-accounts-v2";
+ const SHELL = ["/", "/manifest.webmanifest", "/favicon.svg", "/icons/icon-192.png", "/icons/icon-512.png"];
+ 
+ self.addEventListener("install", (event) => {
+diff --git a/src/App.tsx b/src/App.tsx
+index 1d839b6..f22e3c5 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -1,43 +1,56 @@
+ import { useState } from "react";
++import type { ReactNode } from "react";
++import {
++  CashIcon,
++  MannequinIcon,
++  ScissorsIcon,
++  SpoolIcon,
++} from "./components/icons";
++import DataProvider from "./data/DataProvider";
+ import Dashboard from "./pages/Dashboard";
+ import Models from "./pages/Models";
+ import Payments from "./pages/Payments";
+ 
+ type Tab = "dashboard" | "models" | "payments";
+ 
+-const TABS: { id: Tab; label: string }[] = [
+-  { id: "dashboard", label: "الحساب" },
+-  { id: "models", label: "الموديلات" },
+-  { id: "payments", label: "الدفعات" },
++const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
++  { id: "dashboard", label: "الحساب", icon: <MannequinIcon /> },
++  { id: "models", label: "الموديلات", icon: <ScissorsIcon /> },
++  { id: "payments", label: "الدفعات", icon: <CashIcon /> },
+ ];
+ 
+ function App() {
+   const [tab, setTab] = useState<Tab>("dashboard");
+ 
+-  // بنعرض الصفحة النشطة بس، فكل مرة تفتحها بتتحمّل بيانات جديدة
++  // البيانات في DataProvider، فالتنقل بين الصفحات فوري ومابيحمّلش من جديد
+   return (
+-    <div className="app">
+-      <header className="app-header">Factory Accounts</header>
++    <DataProvider>
++      <div className="app">
++        <header className="app-header">
++          <SpoolIcon size={24} /> حسابات المصنع
++        </header>
+ 
+-      <main className="app-main">
+-        {tab === "dashboard" && <Dashboard />}
+-        {tab === "models" && <Models />}
+-        {tab === "payments" && <Payments />}
+-      </main>
++        <main className="app-main">
++          {tab === "dashboard" && <Dashboard />}
++          {tab === "models" && <Models />}
++          {tab === "payments" && <Payments />}
++        </main>
+ 
+-      <nav className="tabbar" aria-label="التنقل">
+-        {TABS.map(({ id, label }) => (
+-          <button
+-            key={id}
+-            className={tab === id ? "tab active" : "tab"}
+-            aria-current={tab === id ? "page" : undefined}
+-            onClick={() => setTab(id)}
+-          >
+-            {label}
+-          </button>
+-        ))}
+-      </nav>
+-    </div>
++        <nav className="tabbar" aria-label="التنقل">
++          {TABS.map(({ id, label, icon }) => (
++            <button
++              key={id}
++              className={tab === id ? "tab active" : "tab"}
++              aria-current={tab === id ? "page" : undefined}
++              onClick={() => setTab(id)}
++            >
++              {icon}
++              <span>{label}</span>
++            </button>
++          ))}
++        </nav>
++      </div>
++    </DataProvider>
+   );
+ }
+ 
+diff --git a/src/components/SettlementModal.tsx b/src/components/SettlementModal.tsx
+new file mode 100644
+index 0000000..fadd1b5
+--- /dev/null
++++ b/src/components/SettlementModal.tsx
+@@ -0,0 +1,125 @@
++import { useState } from "react";
++import Field from "./Field";
++import Modal from "./Modal";
++import { createSettlement } from "../services/api";
++import type { Model, Payment, Settlement } from "../types";
++import { lastDayOfMonth, summarizeUpTo } from "../utils/calculations";
++import { formatCurrency, formatNumber } from "../utils/format";
++
++interface SettlementModalProps {
++  models: Model[];
++  payments: Payment[];
++  lastSettlementDate: string | null;
++  onClose: () => void;
++  onCreated: (settlement: Settlement) => void;
++}
++
++function SettlementModal({
++  models,
++  payments,
++  lastSettlementDate,
++  onClose,
++  onCreated,
++}: SettlementModalProps) {
++  const [month, setMonth] = useState("");
++  const [notes, setNotes] = useState("");
++  const [saving, setSaving] = useState(false);
++  const [error, setError] = useState("");
++
++  const upTo = month ? lastDayOfMonth(month) : "";
++  const tooEarly =
++    upTo !== "" && lastSettlementDate !== null && upTo <= lastSettlementDate;
++
++  // معاينة: الرصيد اللي هيتقفل بالتسوية دي
++  const preview =
++    upTo && !tooEarly
++      ? summarizeUpTo(models, payments, lastSettlementDate, upTo)
++      : null;
++
++  async function handleConfirm() {
++    if (!upTo) return setError("اختاري الشهر الأول");
++    if (tooEarly) return setError("الشهر ده قبل آخر تسوية أو نفس شهرها");
++
++    try {
++      setSaving(true);
++      setError("");
++      const created = await createSettlement({ date: upTo, notes: notes.trim() });
++      onCreated(created);
++    } catch (err) {
++      console.error(err);
++      setError("تعذر تسجيل التسوية، حاول مرة تانية");
++      setSaving(false);
++    }
++  }
++
++  return (
++    <Modal title="تسوية الحساب" onClose={onClose}>
++      <p className="muted">
++        التسوية بتقفل الحساب لحد آخر يوم في الشهر اللي تختاريه. الحساب الجديد
++        بيبدأ من اليوم اللي بعده، وكل اللي قبل كده بيفضل موجود في الجداول بس
++        مش بيتحسب.
++      </p>
++
++      <Field
++        label="تسوية لحد نهاية شهر"
++        type="month"
++        value={month}
++        onChange={(e) => setMonth(e.target.value)}
++        error={tooEarly ? "الشهر ده قبل آخر تسوية أو نفس شهرها" : undefined}
++      />
++      <Field
++        label="ملاحظات (اختياري)"
++        type="text"
++        value={notes}
++        onChange={(e) => setNotes(e.target.value)}
++      />
++
++      {preview && (
++        <div className="settle-preview">
++          <div>
++            لحد <strong>{upTo}</strong>
++          </div>
++          <div>
++            الشغل: {formatCurrency(preview.totalWork)} — الدفعات:{" "}
++            {formatCurrency(preview.totalPayments)} (
++            {formatNumber(preview.totalPieces)} قطعة)
++          </div>
++          <div>
++            الرصيد اللي هيتقفل:{" "}
++            <strong>
++              {formatCurrency(Math.abs(preview.balance))}{" "}
++              {preview.balance > 0
++                ? "مستحق للمصنع"
++                : preview.balance < 0
++                  ? "مستحق للتاجر"
++                  : "(متسوي)"}
++            </strong>
++          </div>
++          {preview.balance !== 0 && (
++            <div className="form-error">
++              انتبهي: الرصيد ده مش هيتنقل للحساب الجديد. لو لسه ما اتسددش
++              بالكامل، اتأكدي إنه اتسدد أو اتفقتوا عليه قبل ما تأكدي.
++            </div>
++          )}
++        </div>
++      )}
++
++      {error && <p className="form-error">{error}</p>}
++
++      <div className="actions">
++        <button
++          className="btn btn-primary"
++          onClick={handleConfirm}
++          disabled={saving || !preview}
++        >
++          {saving ? "جاري التسجيل..." : "تأكيد التسوية"}
++        </button>
++        <button className="btn" onClick={onClose} disabled={saving}>
++          إلغاء
++        </button>
++      </div>
++    </Modal>
++  );
++}
++
++export default SettlementModal;
+diff --git a/src/components/TableFilters.tsx b/src/components/TableFilters.tsx
+new file mode 100644
+index 0000000..3d08d1e
+--- /dev/null
++++ b/src/components/TableFilters.tsx
+@@ -0,0 +1,58 @@
++interface TableFiltersProps {
++  search: string;
++  onSearch: (value: string) => void;
++  month: string; // yyyy-MM أو فاضي
++  onMonth: (value: string) => void;
++  placeholder: string;
++  shown: number; // عدد الصفوف بعد الفلتر
++  total: number; // العدد الكلي
++}
++
++function TableFilters({
++  search,
++  onSearch,
++  month,
++  onMonth,
++  placeholder,
++  shown,
++  total,
++}: TableFiltersProps) {
++  const active = search !== "" || month !== "";
++
++  return (
++    <div className="table-filters">
++      <input
++        type="search"
++        value={search}
++        onChange={(e) => onSearch(e.target.value)}
++        placeholder={placeholder}
++        aria-label="بحث"
++      />
++      <label>
++        الشهر
++        <input
++          type="month"
++          value={month}
++          onChange={(e) => onMonth(e.target.value)}
++        />
++      </label>
++      {active && (
++        <button
++          type="button"
++          className="btn btn-sm"
++          onClick={() => {
++            onSearch("");
++            onMonth("");
++          }}
++        >
++          مسح الفلتر
++        </button>
++      )}
++      <span className="filter-count">
++        {active ? `${shown} من ${total}` : `${total}`}
++      </span>
++    </div>
++  );
++}
++
++export default TableFilters;
+diff --git a/src/components/icons.tsx b/src/components/icons.tsx
+new file mode 100644
+index 0000000..dc704d9
+--- /dev/null
++++ b/src/components/icons.tsx
+@@ -0,0 +1,67 @@
++import type { SVGProps } from "react";
++
++type IconProps = SVGProps<SVGSVGElement> & { size?: number };
++
++function Icon({ size = 22, children, ...props }: IconProps) {
++  return (
++    <svg
++      width={size}
++      height={size}
++      viewBox="0 0 24 24"
++      fill="none"
++      stroke="currentColor"
++      strokeWidth={1.8}
++      strokeLinecap="round"
++      strokeLinejoin="round"
++      aria-hidden="true"
++      {...props}
++    >
++      {children}
++    </svg>
++  );
++}
++
++/** مقص */
++export const ScissorsIcon = (props: IconProps) => (
++  <Icon {...props}>
++    <circle cx="6.5" cy="18" r="2.8" />
++    <circle cx="17.5" cy="18" r="2.8" />
++    <path d="M8.4 15.9 19.5 3.5M15.6 15.9 4.5 3.5" />
++  </Icon>
++);
++
++/** بكرة خيط */
++export const SpoolIcon = (props: IconProps) => (
++  <Icon {...props}>
++    <rect x="5" y="3" width="14" height="3" rx="1" />
++    <rect x="5" y="18" width="14" height="3" rx="1" />
++    <path d="M7 6v12M17 6v12M7 9l10 2.2M7 12.5l10 2.2M7 16l10 1.5" />
++  </Icon>
++);
++
++/** مانيكان */
++export const MannequinIcon = (props: IconProps) => (
++  <Icon {...props}>
++    <path d="M12 2.5v2.2" />
++    <path d="M8.5 6.5c.8-.9 2-1.2 3.5-.2 1.5-1 2.7-.7 3.5.2.5 3.6-.3 6.6-3.5 9-3.2-2.4-4-5.4-3.5-9z" />
++    <path d="M12 15.5v5M8.5 20.5h7" />
++  </Icon>
++);
++
++/** فلوس */
++export const CashIcon = (props: IconProps) => (
++  <Icon {...props}>
++    <rect x="3" y="6.5" width="18" height="11" rx="2" />
++    <circle cx="12" cy="12" r="2.5" />
++    <path d="M6.5 12h.01M17.5 12h.01" />
++  </Icon>
++);
++
++/** إبرة وخيط (للتسوية) */
++export const NeedleIcon = (props: IconProps) => (
++  <Icon {...props}>
++    <path d="M19.5 3.5 6 17" />
++    <ellipse cx="17.6" cy="5.4" rx="0.9" ry="1.8" transform="rotate(45 17.6 5.4)" />
++    <path d="M6 17c-2 .5-3 1.5-3 3.5 2 0 3-1 3.5-3" strokeDasharray="2 2" />
++  </Icon>
++);
+diff --git a/src/data/DataProvider.tsx b/src/data/DataProvider.tsx
+new file mode 100644
+index 0000000..59767c7
+--- /dev/null
++++ b/src/data/DataProvider.tsx
+@@ -0,0 +1,127 @@
++import { useCallback, useEffect, useRef, useState } from "react";
++import type { ReactNode } from "react";
++import { getAll } from "../services/api";
++import type { Model, Payment, Settlement } from "../types";
++import { DataContext } from "./dataContext";
++
++const CACHE_KEY = "factory-accounts-cache-v1";
++const STALE_AFTER_MS = 2 * 60 * 1000; // بنحدّث لما نرجع للتطبيق بعد دقيقتين
++
++interface Cache {
++  models: Model[];
++  payments: Payment[];
++  settlements: Settlement[];
++}
++
++function readCache(): Cache | null {
++  try {
++    const raw = localStorage.getItem(CACHE_KEY);
++    return raw ? (JSON.parse(raw) as Cache) : null;
++  } catch {
++    return null;
++  }
++}
++
++/**
++ * مكان واحد للبيانات كلها:
++ * - بنعرض آخر نسخة محفوظة على الجهاز فورًا، وبنحدّث من الشيت في الخلفية
++ * - التنقل بين الصفحات مابيحمّلش من جديد
++ */
++function DataProvider({ children }: { children: ReactNode }) {
++  const [cache] = useState(readCache);
++  const [models, setModels] = useState<Model[]>(cache?.models ?? []);
++  const [payments, setPayments] = useState<Payment[]>(cache?.payments ?? []);
++  const [settlements, setSettlements] = useState<Settlement[]>(
++    cache?.settlements ?? [],
++  );
++  const [hasData, setHasData] = useState(cache !== null);
++  const [refreshing, setRefreshing] = useState(true); // بنحمّل أول ما التطبيق يفتح
++  const [error, setError] = useState("");
++  const [reloadKey, setReloadKey] = useState(0);
++  const lastFetchedAt = useRef(0);
++
++  useEffect(() => {
++    let cancelled = false;
++
++    async function run() {
++      try {
++        const data = await getAll();
++        if (cancelled) return;
++        setModels(data.models);
++        setPayments(data.payments);
++        setSettlements(data.settlements ?? []);
++        setHasData(true);
++        setError("");
++        lastFetchedAt.current = Date.now();
++      } catch (err) {
++        console.error(err);
++        if (!cancelled) setError("تعذر تحميل البيانات");
++      } finally {
++        if (!cancelled) setRefreshing(false);
++      }
++    }
++
++    void run();
++    return () => {
++      cancelled = true;
++    };
++  }, [reloadKey]);
++
++  // نحفظ نسخة على الجهاز عشان الفتح الجاي يبقى فوري
++  useEffect(() => {
++    if (!hasData) return;
++    try {
++      localStorage.setItem(
++        CACHE_KEY,
++        JSON.stringify({ models, payments, settlements }),
++      );
++    } catch {
++      // التخزين ممتلئ أو ممنوع: مش مشكلة، التطبيق هيشتغل عادي
++    }
++  }, [models, payments, settlements, hasData]);
++
++  const refresh = useCallback(() => {
++    setRefreshing(true);
++    setReloadKey((key) => key + 1);
++  }, []);
++
++  // لما نرجع للتطبيق بعد فترة نحدّث تلقائيًا
++  useEffect(() => {
++    function onVisible() {
++      if (
++        document.visibilityState === "visible" &&
++        Date.now() - lastFetchedAt.current > STALE_AFTER_MS
++      ) {
++        refresh();
++      }
++    }
++    document.addEventListener("visibilitychange", onVisible);
++    return () => document.removeEventListener("visibilitychange", onVisible);
++  }, [refresh]);
++
++  const lastSettlementDate =
++    settlements.reduce((max, s) => (s.date > max ? s.date : max), "") || null;
++
++  return (
++    <DataContext.Provider
++      value={{
++        models,
++        payments,
++        settlements,
++        setModels,
++        setPayments,
++        setSettlements,
++        hasData,
++        loading: !hasData && refreshing,
++        refreshing,
++        error,
++        refresh,
++        lastSettlementDate,
++      }}
++    >
++      {children}
++    </DataContext.Provider>
++  );
++}
++
++export default DataProvider;
+diff --git a/src/data/dataContext.ts b/src/data/dataContext.ts
+new file mode 100644
+index 0000000..59cca3d
+--- /dev/null
++++ b/src/data/dataContext.ts
+@@ -0,0 +1,24 @@
++import { createContext } from "react";
++import type { Dispatch, SetStateAction } from "react";
++import type { Model, Payment, Settlement } from "../types";
++
++export interface DataContextValue {
++  models: Model[];
++  payments: Payment[];
++  settlements: Settlement[];
++  setModels: Dispatch<SetStateAction<Model[]>>;
++  setPayments: Dispatch<SetStateAction<Payment[]>>;
++  setSettlements: Dispatch<SetStateAction<Settlement[]>>;
++  /** عندنا بيانات نعرضها (من الجهاز أو من النت) */
++  hasData: boolean;
++  /** أول تحميل ومفيش حاجة محفوظة نعرضها */
++  loading: boolean;
++  /** بنحدّث في الخلفية */
++  refreshing: boolean;
++  error: string;
++  refresh: () => void;
++  /** تاريخ آخر تسوية، أو null */
++  lastSettlementDate: string | null;
++}
++
++export const DataContext = createContext<DataContextValue | null>(null);
+diff --git a/src/data/useData.ts b/src/data/useData.ts
+new file mode 100644
+index 0000000..d0c8ae5
+--- /dev/null
++++ b/src/data/useData.ts
+@@ -0,0 +1,8 @@
++import { useContext } from "react";
++import { DataContext } from "./dataContext";
++
++export function useData() {
++  const value = useContext(DataContext);
++  if (!value) throw new Error("useData لازم يتستخدم جوه DataProvider");
++  return value;
++}
+diff --git a/src/index.css b/src/index.css
+index 598d6f3..1f696c6 100644
+--- a/src/index.css
++++ b/src/index.css
+@@ -422,3 +422,110 @@ details.panel > summary { cursor: pointer; font-weight: 700; }
+ @media (min-width: 640px) {
+   .filters { grid-template-columns: repeat(3, 1fr); }
+ }
++
++/* ===== ستايل مصنع الملابس ===== */
++
++/* هيدر بغرزة (خط متقطع زي الخياطة) */
++.app-header {
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  gap: 8px;
++  border-bottom: 3px dashed rgba(255, 255, 255, 0.55);
++}
++
++/* التابس بأيقونات */
++.tab {
++  display: flex;
++  flex-direction: column;
++  align-items: center;
++  justify-content: center;
++  gap: 2px;
++  font-size: 0.8rem;
++}
++
++/* كارت الرصيد بإطار متقطع كأنه مخيّط */
++.balance-card {
++  position: relative;
++  outline: 2px dashed rgba(255, 255, 255, 0.55);
++  outline-offset: -8px;
++}
++
++.cards { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
++.card span { display: flex; align-items: center; gap: 4px; }
++
++.state svg { display: block; margin: 0 auto 8px; color: var(--primary); opacity: 0.6; }
++
++/* شريط التسوية */
++.settle-bar {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  gap: 8px;
++  background: var(--surface);
++  border: 2px dashed var(--border);
++  border-radius: var(--radius);
++  padding: 10px 12px;
++  margin-bottom: 10px;
++}
++.settle-bar span { flex: 1; min-width: 150px; font-weight: 700; }
++.toggle { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; font-size: 0.9rem; color: var(--muted); }
++.muted { color: var(--muted); font-size: 0.9rem; }
++
++.settle-preview {
++  background: #eef3f1;
++  border-radius: 10px;
++  padding: 10px 12px;
++  margin-bottom: 12px;
++  display: flex;
++  flex-direction: column;
++  gap: 4px;
++  font-size: 0.92rem;
++}
++
++.history { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
++.history li {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 8px;
++  border: 1px solid var(--border);
++  border-radius: 10px;
++  padding: 8px 10px;
++}
++.history small { display: block; color: var(--muted); }
++
++/* فلتر الجداول */
++.table-filters {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: end;
++  gap: 8px;
++  margin-bottom: 12px;
++}
++.table-filters > input[type="search"],
++.table-filters label input {
++  font: inherit;
++  min-height: 40px;
++  padding: 6px 10px;
++  border: 1px solid var(--border);
++  border-radius: 10px;
++  background: #fff;
++}
++.table-filters > input[type="search"] { flex: 1; min-width: 160px; }
++.table-filters label { display: flex; flex-direction: column; gap: 2px; font-size: 0.8rem; color: var(--muted); }
++.filter-count { color: var(--muted); font-size: 0.85rem; margin-inline-start: auto; }
++
++/* صفوف اللي اتسوّت */
++.row-settled td { color: var(--muted); background: #f8faf9; }
++.badge {
++  display: inline-block;
++  margin-inline-start: 6px;
++  padding: 1px 8px;
++  font-size: 0.72rem;
++  border-radius: 999px;
++  background: #d7ece9;
++  color: var(--primary-dark);
++}
++
++.show-more { display: block; width: 100%; margin-top: 12px; }
+diff --git a/src/pages/Dashboard.tsx b/src/pages/Dashboard.tsx
+index 2f95859..92dfdd6 100644
+--- a/src/pages/Dashboard.tsx
++++ b/src/pages/Dashboard.tsx
+@@ -1,69 +1,74 @@
+-import { useEffect, useState } from "react";
++import { useState } from "react";
++import ConfirmDialog from "../components/ConfirmDialog";
++import {
++  CashIcon,
++  MannequinIcon,
++  NeedleIcon,
++  ScissorsIcon,
++} from "../components/icons";
++import Modal from "../components/Modal";
+ import SearchSelect from "../components/SearchSelect";
++import SettlementModal from "../components/SettlementModal";
+ import WeeklyChart from "../components/WeeklyChart";
+-import { getModels, getPayments } from "../services/api";
+-import type { Model, Payment } from "../types";
++import { useData } from "../data/useData";
++import { deleteSettlement } from "../services/api";
++import type { Model, Settlement } from "../types";
+ import {
+   calculateSummary,
+   groupByWeek,
+   selectPeriod,
+   sortModelsByDate,
+ } from "../utils/calculations";
+-import {
+-  formatCurrency,
+-  formatMeters,
+-  formatNumber,
+-} from "../utils/format";
++import { formatCurrency, formatNumber } from "../utils/format";
+ 
+-const WEEKS_SHOWN = 12;
++const WEEKS_SHOWN = 7;
+ 
+ // لو الـ id اللي كنا مختارينه اتحذف، نرجع للافتراضي (null)
+ const existing = (id: string | null, list: { id: string }[]) =>
+   id !== null && list.some((item) => item.id === id) ? id : null;
+ 
+ function Dashboard() {
+-  const [models, setModels] = useState<Model[]>([]);
+-  const [payments, setPayments] = useState<Payment[]>([]);
+-  const [loading, setLoading] = useState(true);
+-  const [error, setError] = useState("");
+-  const [reloadKey, setReloadKey] = useState(0);
++  const {
++    models,
++    payments,
++    settlements,
++    setSettlements,
++    loading,
++    hasData,
++    refreshing,
++    error,
++    refresh,
++    lastSettlementDate,
++  } = useData();
+ 
+   // null = الافتراضي: أول موديل / آخر موديل / من غير نهاية للدفعات
+   const [startModelId, setStartModelId] = useState<string | null>(null);
+   const [endModelId, setEndModelId] = useState<string | null>(null);
+   const [paymentsEndId, setPaymentsEndId] = useState<string | null>(null);
+ 
+-  useEffect(() => {
+-    let cancelled = false;
+-
+-    async function run() {
+-      try {
+-        const [modelsData, paymentsData] = await Promise.all([
+-          getModels(),
+-          getPayments(),
+-        ]);
+-        if (cancelled) return;
+-        setModels(modelsData);
+-        setPayments(paymentsData);
+-        setError("");
+-      } catch (err) {
+-        console.error(err);
+-        if (!cancelled) setError("حدث خطأ أثناء تحميل الحساب");
+-      } finally {
+-        if (!cancelled) setLoading(false);
+-      }
+-    }
++  // عرض الحساب من الأول (تجاهل آخر تسوية)
++  const [ignoreSettlement, setIgnoreSettlement] = useState(false);
++  const [settleOpen, setSettleOpen] = useState(false);
++  const [historyOpen, setHistoryOpen] = useState(false);
++  const [deletingSettlement, setDeletingSettlement] =
++    useState<Settlement | null>(null);
++  const [deleteBusy, setDeleteBusy] = useState(false);
++  const [actionError, setActionError] = useState("");
+ 
+-    void run();
+-    return () => {
+-      cancelled = true;
+-    };
+-  }, [reloadKey]);
++  const settledUpTo = ignoreSettlement ? null : lastSettlementDate;
+ 
+-  function retry() {
+-    setLoading(true);
+-    setError("");
+-    setReloadKey((key) => key + 1);
++  // الموديلات والدفعات اللي لسه بتتحسب (بعد آخر تسوية)
++  const sortedModels = sortModelsByDate(models).filter(
++    (m) => settledUpTo === null || m.date > settledUpTo,
++  );
++  const eligiblePayments = payments.filter(
++    (p) => settledUpTo === null || p.date > settledUpTo,
++  );
++
++  function resetPeriod() {
++    setStartModelId(null);
++    setEndModelId(null);
++    setPaymentsEndId(null);
+   }
+ 
+   // لما البداية تتغير، لو النهاية بقت قبلها نرجّعها للافتراضي
+@@ -71,26 +76,46 @@ function Dashboard() {
+     setStartModelId(id);
+ 
+     if (id !== null && endModelId !== null) {
+-      const sorted = sortModelsByDate(models);
+-      const startIndex = sorted.findIndex((m) => m.id === id);
+-      const endIndex = sorted.findIndex((m) => m.id === endModelId);
++      const startIndex = sortedModels.findIndex((m) => m.id === id);
++      const endIndex = sortedModels.findIndex((m) => m.id === endModelId);
+       if (endIndex < startIndex) setEndModelId(null);
+     }
+   }
+ 
+-  function resetPeriod() {
+-    setStartModelId(null);
+-    setEndModelId(null);
+-    setPaymentsEndId(null);
++  function handleSettlementCreated(created: Settlement) {
++    setSettlements((prev) => [...prev, created]);
++    resetPeriod();
++    setIgnoreSettlement(false);
++    setSettleOpen(false);
++  }
++
++  async function handleDeleteSettlement() {
++    if (!deletingSettlement) return;
++    try {
++      setDeleteBusy(true);
++      setActionError("");
++      await deleteSettlement(deletingSettlement.id);
++      setSettlements((prev) =>
++        prev.filter((s) => s.id !== deletingSettlement.id),
++      );
++      resetPeriod();
++      setDeletingSettlement(null);
++    } catch (err) {
++      console.error(err);
++      setActionError("تعذر إلغاء التسوية، حاول مرة تانية");
++      setDeletingSettlement(null);
++    } finally {
++      setDeleteBusy(false);
++    }
+   }
+ 
+   if (loading) return <p className="state">جاري تحميل الحساب...</p>;
+ 
+-  if (error) {
++  if (!hasData && error) {
+     return (
+       <div className="state state-error">
+         <p>{error}</p>
+-        <button className="btn" onClick={retry}>
++        <button className="btn" onClick={refresh}>
+           إعادة المحاولة
+         </button>
+       </div>
+@@ -98,17 +123,17 @@ function Dashboard() {
+   }
+ 
+   // ---------- الحسابات (مش state، بتتحسب من اللي فوق) ----------
+-  const sortedModels = sortModelsByDate(models);
+-
+   const startId = existing(startModelId, sortedModels);
+   const endId = existing(endModelId, sortedModels);
+-  const payEndId = existing(paymentsEndId, payments);
+-  const paymentsEndDate = payments.find((p) => p.id === payEndId)?.date ?? null;
++  const payEndId = existing(paymentsEndId, eligiblePayments);
++  const paymentsEndDate =
++    payments.find((p) => p.id === payEndId)?.date ?? null;
+ 
+   const options = {
+     startModelId: startId ?? sortedModels[0]?.id ?? "",
+     endModelId: endId,
+     paymentsEndDate,
++    settledUpTo,
+   };
+ 
+   const summary = calculateSummary(models, payments, options);
+@@ -134,7 +159,7 @@ function Dashboard() {
+     : 0;
+   const endItems = sortedModels.slice(startIndex).reverse().map(modelItem);
+ 
+-  const paymentItems = [...payments]
++  const paymentItems = [...eligiblePayments]
+     .sort((a, b) => b.date.localeCompare(a.date))
+     .map((p) => ({
+       value: p.id,
+@@ -159,14 +184,50 @@ function Dashboard() {
+     <section>
+       <div className="page-head">
+         <h1>الحسابات</h1>
+-        <button className="btn" onClick={retry}>
+-          تحديث
++        <button className="btn" onClick={refresh} disabled={refreshing}>
++          {refreshing ? "جاري التحديث..." : "تحديث"}
++        </button>
++      </div>
++
++      {error && hasData && (
++        <p className="form-error">تعذر التحديث، بنعرض آخر بيانات محفوظة.</p>
++      )}
++      {actionError && <p className="form-error">{actionError}</p>}
++
++      <div className="settle-bar">
++        <NeedleIcon size={20} />
++        <span>
++          {lastSettlementDate
++            ? `آخر تسوية: لحد ${lastSettlementDate}`
++            : "لا توجد تسويات سابقة"}
++        </span>
++        <button className="btn btn-sm" onClick={() => setSettleOpen(true)}>
++          تسوية الحساب
+         </button>
++        {settlements.length > 0 && (
++          <button className="btn btn-sm" onClick={() => setHistoryOpen(true)}>
++            سجل التسويات
++          </button>
++        )}
+       </div>
+ 
++      {lastSettlementDate && (
++        <label className="toggle">
++          <input
++            type="checkbox"
++            checked={ignoreSettlement}
++            onChange={(e) => {
++              setIgnoreSettlement(e.target.checked);
++              resetPeriod();
++            }}
++          />
++          عرض الحساب من الأول (تجاهل التسوية)
++        </label>
++      )}
++
+       <details className="panel">
+         <summary>
+-          فترة الحساب: {isCustomPeriod ? "مخصصة" : "كل الموديلات والدفعات"}
++          فترة الحساب: {isCustomPeriod ? "مخصصة" : "الافتراضية"}
+         </summary>
+ 
+         <div className="filters">
+@@ -210,41 +271,94 @@ function Dashboard() {
+       </details>
+ 
+       <div className={`balance-card ${tone}`}>
+-        <span>الرصيد الحالي</span>
++        <span>
++          الرصيد الحالي
++          {settledUpTo ? ` (من بعد ${settledUpTo})` : ""}
++        </span>
+         <strong>{formatCurrency(Math.abs(summary.balance))}</strong>
+         <em>{balanceText}</em>
+       </div>
+ 
+       <div className="cards">
+         <div className="card">
+-          <span>إجمالي قيمة الشغل</span>
++          <span>
++            <ScissorsIcon size={16} /> إجمالي قيمة الشغل
++          </span>
+           <strong>{formatCurrency(summary.totalWork)}</strong>
+         </div>
+         <div className="card">
+-          <span>إجمالي الدفعات</span>
++          <span>
++            <CashIcon size={16} /> إجمالي الدفعات
++          </span>
+           <strong>{formatCurrency(summary.totalPayments)}</strong>
+         </div>
+         <div className="card">
+-          <span>إجمالي القطع</span>
++          <span>
++            <MannequinIcon size={16} /> إجمالي القطع
++          </span>
+           <strong>{formatNumber(summary.totalPieces)} قطعة</strong>
+         </div>
+-        <div className="card">
+-          <span>إجمالي المتراج</span>
+-          <strong>{formatMeters(summary.totalFabricCm)}</strong>
+-        </div>
+       </div>
+ 
+       <div className="panel">
+-        <h2>الصافي الأسبوعي</h2>
++        <h2>الصافي الأسبوعي (آخر {WEEKS_SHOWN} أسابيع)</h2>
+         <WeeklyChart data={weeks} />
+         <p className="chart-note">
+           <span className="dot dot-pos" /> أزرق: الشغل أكبر من الدفعات (مستحق
+           للمصنع زاد) · <span className="dot dot-neg" /> أحمر: الدفعات أكبر من
+           الشغل. الصافي = قيمة الشغل − الدفعات في الأسبوع، ومش ربح فعلي لأن
+-          تكاليف المصنع مش متسجلة. الأسبوع بيبدأ من السبت، وآخر {WEEKS_SHOWN}{" "}
+-          أسبوع داخل الفترة المختارة.
++          تكاليف المصنع مش متسجلة. الأسبوع بيبدأ من السبت.
+         </p>
+       </div>
++
++      {settleOpen && (
++        <SettlementModal
++          models={models}
++          payments={payments}
++          lastSettlementDate={lastSettlementDate}
++          onClose={() => setSettleOpen(false)}
++          onCreated={handleSettlementCreated}
++        />
++      )}
++
++      {historyOpen && (
++        <Modal title="سجل التسويات" onClose={() => setHistoryOpen(false)}>
++          <ul className="history">
++            {[...settlements]
++              .sort((a, b) => b.date.localeCompare(a.date))
++              .map((s) => (
++                <li key={s.id}>
++                  <div>
++                    <strong>لحد {s.date}</strong>
++                    {s.notes && <small>{s.notes}</small>}
++                  </div>
++                  <button
++                    className="btn btn-sm btn-danger"
++                    onClick={() => setDeletingSettlement(s)}
++                  >
++                    إلغاء التسوية
++                  </button>
++                </li>
++              ))}
++          </ul>
++          <div className="actions">
++            <button className="btn" onClick={() => setHistoryOpen(false)}>
++              إغلاق
++            </button>
++          </div>
++        </Modal>
++      )}
++
++      {deletingSettlement && (
++        <ConfirmDialog
++          title="إلغاء التسوية"
++          message={`متأكدة إنك عايزة تلغي تسوية ${deletingSettlement.date}؟ الحساب هيرجع يحسب من قبلها.`}
++          confirmLabel="إلغاء التسوية"
++          busy={deleteBusy}
++          onConfirm={handleDeleteSettlement}
++          onCancel={() => setDeletingSettlement(null)}
++        />
++      )}
+     </section>
+   );
+ }
+diff --git a/src/pages/Models.tsx b/src/pages/Models.tsx
+index 9398ca0..ed6b229 100644
+--- a/src/pages/Models.tsx
++++ b/src/pages/Models.tsx
+@@ -1,13 +1,11 @@
+-import { useEffect, useMemo, useState } from "react";
++import { useMemo, useState } from "react";
+ import ConfirmDialog from "../components/ConfirmDialog";
++import { ScissorsIcon } from "../components/icons";
+ import Modal from "../components/Modal";
+ import ModelForm from "../components/ModelForm";
+-import {
+-  createModel,
+-  deleteModel,
+-  getModels,
+-  updateModel,
+-} from "../services/api";
++import TableFilters from "../components/TableFilters";
++import { useData } from "../data/useData";
++import { createModel, deleteModel, updateModel } from "../services/api";
+ import type { Model, NewModelData } from "../types";
+ import {
+   formatCurrency,
+@@ -15,11 +13,18 @@ import {
+   formatNumber,
+   toDateInput,
+ } from "../utils/format";
++import { PAGE_SIZE, compareNewest, matchesMonth } from "../utils/table";
+ 
+ function Models() {
+-  const [models, setModels] = useState<Model[]>([]);
+-  const [loading, setLoading] = useState(true);
+-  const [error, setError] = useState("");
++  const {
++    models,
++    setModels,
++    loading,
++    hasData,
++    error,
++    refresh,
++    lastSettlementDate,
++  } = useData();
+ 
+   // "new" = إضافة، Model = تعديل، null = الفورم مقفول
+   const [editing, setEditing] = useState<Model | "new" | null>(null);
+@@ -27,53 +32,43 @@ function Models() {
+   const [deleteBusy, setDeleteBusy] = useState(false);
+   const [actionError, setActionError] = useState("");
+ 
+-  const [reloadKey, setReloadKey] = useState(0);
+-
+-  useEffect(() => {
+-    let cancelled = false;
+-
+-    async function run() {
+-      try {
+-        const data = await getModels();
+-        if (cancelled) return;
+-        setModels(data);
+-        setError("");
+-      } catch (err) {
+-        console.error(err);
+-        if (!cancelled) setError("حدث خطأ أثناء تحميل الموديلات");
+-      } finally {
+-        if (!cancelled) setLoading(false);
+-      }
+-    }
+-
+-    void run();
+-    return () => {
+-      cancelled = true;
+-    };
+-  }, [reloadKey]);
+-
+-  function retry() {
+-    setLoading(true);
+-    setError("");
+-    setReloadKey((key) => key + 1);
+-  }
+-
+-  // الأحدث فوق
+-  const sorted = useMemo(() => {
+-    return [...models].sort((a, b) =>
+-      (a.modelName ?? "").localeCompare(b.modelName ?? ""),
+-    );
+-  }, [models]);
+-
++  const [search, setSearch] = useState("");
++  const [month, setMonth] = useState("");
++  const [limit, setLimit] = useState(PAGE_SIZE);
++
++  // الأحدث فوق + الفلتر
++  const filtered = useMemo(() => {
++    const query = search.trim().toLowerCase();
++    return [...models]
++      .sort(compareNewest)
++      .filter(
++        (m) =>
++          (!query || m.modelName.toLowerCase().includes(query)) &&
++          matchesMonth(m.date, month),
++      );
++  }, [models, search, month]);
++
++  // الإجماليات على كل نتايج الفلتر (مش على أول ٥٠ بس)
+   const totals = useMemo(
+     () => ({
+-      pieces: models.reduce((sum, m) => sum + m.quantity, 0),
+-      price: models.reduce((sum, m) => sum + m.totalPrice, 0),
+-      fabricCm: models.reduce((sum, m) => sum + m.totalFabricCm, 0),
++      pieces: filtered.reduce((sum, m) => sum + m.quantity, 0),
++      price: filtered.reduce((sum, m) => sum + m.totalPrice, 0),
++      fabricCm: filtered.reduce((sum, m) => sum + m.totalFabricCm, 0),
+     }),
+-    [models],
++    [filtered],
+   );
+ 
++  const visible = filtered.slice(0, limit);
++
++  function changeSearch(value: string) {
++    setSearch(value);
++    setLimit(PAGE_SIZE);
++  }
++  function changeMonth(value: string) {
++    setMonth(value);
++    setLimit(PAGE_SIZE);
++  }
++
+   async function handleSave(data: NewModelData) {
+     if (editing && editing !== "new") {
+       const updated = await updateModel(editing.id, data);
+@@ -115,19 +110,30 @@ function Models() {
+ 
+       {loading ? (
+         <p className="state">جاري تحميل الموديلات...</p>
+-      ) : error ? (
++      ) : !hasData && error ? (
+         <div className="state state-error">
+           <p>{error}</p>
+-          <button className="btn" onClick={retry}>
++          <button className="btn" onClick={refresh}>
+             إعادة المحاولة
+           </button>
+         </div>
+       ) : models.length === 0 ? (
+-        <p className="state">
+-          لا توجد موديلات حتى الآن. اضغط "إضافة موديل" للبدء.
+-        </p>
++        <div className="state">
++          <ScissorsIcon size={44} />
++          <p>لا توجد موديلات حتى الآن. اضغطي "إضافة موديل" للبدء.</p>
++        </div>
+       ) : (
+         <>
++          <TableFilters
++            search={search}
++            onSearch={changeSearch}
++            month={month}
++            onMonth={changeMonth}
++            placeholder="ابحثي باسم الموديل"
++            shown={filtered.length}
++            total={models.length}
++          />
++
+           <div className="totals">
+             <div>
+               <span>إجمالي القطع</span>
+@@ -143,49 +149,70 @@ function Models() {
+             </div>
+           </div>
+ 
+-          <div className="table-wrap">
+-            <table>
+-              <thead>
+-                <tr>
+-                  <th>التاريخ</th>
+-                  <th>الموديل</th>
+-                  <th>القطع</th>
+-                  <th>سعر القطعة</th>
+-                  <th>المتراج/قطعة</th>
+-                  <th>إجمالي السعر</th>
+-                  <th>إجمالي المتراج</th>
+-                  <th></th>
+-                </tr>
+-              </thead>
+-              <tbody>
+-                {sorted.map((model) => (
+-                  <tr key={model.id}>
+-                    <td>{toDateInput(model.date)}</td>
+-                    <td>{model.modelName}</td>
+-                    <td>{formatNumber(model.quantity)}</td>
+-                    <td>{formatCurrency(model.pricePerPiece)}</td>
+-                    <td>{formatNumber(model.fabricCm)} سم</td>
+-                    <td>{formatCurrency(model.totalPrice)}</td>
+-                    <td>{formatMeters(model.totalFabricCm)}</td>
+-                    <td className="row-actions">
+-                      <button
+-                        className="btn btn-sm"
+-                        onClick={() => setEditing(model)}
+-                      >
+-                        تعديل
+-                      </button>
+-                      <button
+-                        className="btn btn-sm btn-danger"
+-                        onClick={() => setDeleting(model)}
+-                      >
+-                        حذف
+-                      </button>
+-                    </td>
++          {filtered.length === 0 ? (
++            <p className="state">مفيش موديلات مطابقة للفلتر.</p>
++          ) : (
++            <div className="table-wrap">
++              <table>
++                <thead>
++                  <tr>
++                    <th>التاريخ</th>
++                    <th>الموديل</th>
++                    <th>القطع</th>
++                    <th>سعر القطعة</th>
++                    <th>المتراج/قطعة</th>
++                    <th>إجمالي السعر</th>
++                    <th>إجمالي المتراج</th>
++                    <th></th>
+                   </tr>
+-                ))}
+-              </tbody>
+-            </table>
+-          </div>
++                </thead>
++                <tbody>
++                  {visible.map((model) => {
++                    const settled =
++                      lastSettlementDate !== null &&
++                      model.date <= lastSettlementDate;
++                    return (
++                      <tr key={model.id} className={settled ? "row-settled" : ""}>
++                        <td>
++                          {toDateInput(model.date)}
++                          {settled && <span className="badge">مسوّى</span>}
++                        </td>
++                        <td>{model.modelName}</td>
++                        <td>{formatNumber(model.quantity)}</td>
++                        <td>{formatCurrency(model.pricePerPiece)}</td>
++                        <td>{formatNumber(model.fabricCm)} سم</td>
++                        <td>{formatCurrency(model.totalPrice)}</td>
++                        <td>{formatMeters(model.totalFabricCm)}</td>
++                        <td className="row-actions">
++                          <button
++                            className="btn btn-sm"
++                            onClick={() => setEditing(model)}
++                          >
++                            تعديل
++                          </button>
++                          <button
++                            className="btn btn-sm btn-danger"
++                            onClick={() => setDeleting(model)}
++                          >
++                            حذف
++                          </button>
++                        </td>
++                      </tr>
++                    );
++                  })}
++                </tbody>
++              </table>
++            </div>
++          )}
++
++          {filtered.length > visible.length && (
++            <button
++              className="btn show-more"
++              onClick={() => setLimit((l) => l + PAGE_SIZE)}
++            >
++              عرض {PAGE_SIZE} أخرى ({filtered.length - visible.length} متبقي)
++            </button>
++          )}
+         </>
+       )}
+ 
+@@ -205,7 +232,7 @@ function Models() {
+       {deleting && (
+         <ConfirmDialog
+           title="حذف الموديل"
+-          message={`متأكد إنك عايز تحذف موديل "${deleting.modelName}"؟ مش هتقدر ترجّعه.`}
++          message={`متأكدة إنك عايزة تحذفي موديل "${deleting.modelName}"؟ مش هتقدري ترجّعيه.`}
+           busy={deleteBusy}
+           onConfirm={handleDelete}
+           onCancel={() => setDeleting(null)}
+diff --git a/src/pages/Payments.tsx b/src/pages/Payments.tsx
+index 6f01d64..754ac7a 100644
+--- a/src/pages/Payments.tsx
++++ b/src/pages/Payments.tsx
+@@ -1,67 +1,68 @@
+-import { useEffect, useMemo, useState } from "react";
++import { useMemo, useState } from "react";
+ import ConfirmDialog from "../components/ConfirmDialog";
++import { CashIcon } from "../components/icons";
+ import Modal from "../components/Modal";
+ import PaymentForm from "../components/PaymentForm";
++import TableFilters from "../components/TableFilters";
++import { useData } from "../data/useData";
+ import {
+   createPayment,
+   deletePayment,
+-  getPayments,
+   updatePayment,
+ } from "../services/api";
+ import type { NewPaymentData, Payment } from "../types";
+ import { formatCurrency, toDateInput } from "../utils/format";
++import { PAGE_SIZE, compareNewest, matchesMonth } from "../utils/table";
+ 
+ function Payments() {
+-  const [payments, setPayments] = useState<Payment[]>([]);
+-  const [loading, setLoading] = useState(true);
+-  const [error, setError] = useState("");
++  const {
++    payments,
++    setPayments,
++    loading,
++    hasData,
++    error,
++    refresh,
++    lastSettlementDate,
++  } = useData();
+ 
+   const [editing, setEditing] = useState<Payment | "new" | null>(null);
+   const [deleting, setDeleting] = useState<Payment | null>(null);
+   const [deleteBusy, setDeleteBusy] = useState(false);
+   const [actionError, setActionError] = useState("");
+ 
+-  const [reloadKey, setReloadKey] = useState(0);
+-
+-  useEffect(() => {
+-    let cancelled = false;
+-
+-    async function run() {
+-      try {
+-        const data = await getPayments();
+-        if (cancelled) return;
+-        setPayments(data);
+-        setError("");
+-      } catch (err) {
+-        console.error(err);
+-        if (!cancelled) setError("حدث خطأ أثناء تحميل الدفعات");
+-      } finally {
+-        if (!cancelled) setLoading(false);
+-      }
+-    }
+-
+-    void run();
+-    return () => {
+-      cancelled = true;
+-    };
+-  }, [reloadKey]);
+-
+-  function retry() {
+-    setLoading(true);
+-    setError("");
+-    setReloadKey((key) => key + 1);
+-  }
+-
+-  const sorted = useMemo(
+-    () => [...payments].sort((a, b) => b.date.localeCompare(a.date)),
+-    [payments]
+-  );
++  const [search, setSearch] = useState("");
++  const [month, setMonth] = useState("");
++  const [limit, setLimit] = useState(PAGE_SIZE);
++
++  const filtered = useMemo(() => {
++    const query = search.trim().toLowerCase();
++    return [...payments]
++      .sort(compareNewest)
++      .filter(
++        (p) =>
++          (!query ||
++            (p.notes ?? "").toLowerCase().includes(query) ||
++            String(p.amount).includes(query)) &&
++          matchesMonth(p.date, month),
++      );
++  }, [payments, search, month]);
+ 
+   const total = useMemo(
+-    () => payments.reduce((sum, p) => sum + p.amount, 0),
+-    [payments]
++    () => filtered.reduce((sum, p) => sum + p.amount, 0),
++    [filtered],
+   );
+ 
++  const visible = filtered.slice(0, limit);
++
++  function changeSearch(value: string) {
++    setSearch(value);
++    setLimit(PAGE_SIZE);
++  }
++  function changeMonth(value: string) {
++    setMonth(value);
++    setLimit(PAGE_SIZE);
++  }
++
+   async function handleSave(data: NewPaymentData) {
+     if (editing && editing !== "new") {
+       const updated = await updatePayment(editing.id, data);
+@@ -103,17 +104,30 @@ function Payments() {
+ 
+       {loading ? (
+         <p className="state">جاري تحميل الدفعات...</p>
+-      ) : error ? (
++      ) : !hasData && error ? (
+         <div className="state state-error">
+           <p>{error}</p>
+-          <button className="btn" onClick={retry}>
++          <button className="btn" onClick={refresh}>
+             إعادة المحاولة
+           </button>
+         </div>
+       ) : payments.length === 0 ? (
+-        <p className="state">لا توجد دفعات حتى الآن. اضغط "إضافة دفعة" للبدء.</p>
++        <div className="state">
++          <CashIcon size={44} />
++          <p>لا توجد دفعات حتى الآن. اضغطي "إضافة دفعة" للبدء.</p>
++        </div>
+       ) : (
+         <>
++          <TableFilters
++            search={search}
++            onSearch={changeSearch}
++            month={month}
++            onMonth={changeMonth}
++            placeholder="ابحثي بالملاحظات أو القيمة"
++            shown={filtered.length}
++            total={payments.length}
++          />
++
+           <div className="totals">
+             <div>
+               <span>إجمالي الدفعات</span>
+@@ -121,42 +135,69 @@ function Payments() {
+             </div>
+             <div>
+               <span>عدد الدفعات</span>
+-              <strong>{payments.length}</strong>
++              <strong>{filtered.length}</strong>
+             </div>
+           </div>
+ 
+-          <div className="table-wrap">
+-            <table>
+-              <thead>
+-                <tr>
+-                  <th>التاريخ</th>
+-                  <th>القيمة</th>
+-                  <th>ملاحظات</th>
+-                  <th></th>
+-                </tr>
+-              </thead>
+-              <tbody>
+-                {sorted.map((payment) => (
+-                  <tr key={payment.id}>
+-                    <td>{toDateInput(payment.date)}</td>
+-                    <td>{formatCurrency(payment.amount)}</td>
+-                    <td>{payment.notes || "—"}</td>
+-                    <td className="row-actions">
+-                      <button className="btn btn-sm" onClick={() => setEditing(payment)}>
+-                        تعديل
+-                      </button>
+-                      <button
+-                        className="btn btn-sm btn-danger"
+-                        onClick={() => setDeleting(payment)}
+-                      >
+-                        حذف
+-                      </button>
+-                    </td>
++          {filtered.length === 0 ? (
++            <p className="state">مفيش دفعات مطابقة للفلتر.</p>
++          ) : (
++            <div className="table-wrap">
++              <table>
++                <thead>
++                  <tr>
++                    <th>التاريخ</th>
++                    <th>القيمة</th>
++                    <th>ملاحظات</th>
++                    <th></th>
+                   </tr>
+-                ))}
+-              </tbody>
+-            </table>
+-          </div>
++                </thead>
++                <tbody>
++                  {visible.map((payment) => {
++                    const settled =
++                      lastSettlementDate !== null &&
++                      payment.date <= lastSettlementDate;
++                    return (
++                      <tr
++                        key={payment.id}
++                        className={settled ? "row-settled" : ""}
++                      >
++                        <td>
++                          {toDateInput(payment.date)}
++                          {settled && <span className="badge">مسوّى</span>}
++                        </td>
++                        <td>{formatCurrency(payment.amount)}</td>
++                        <td>{payment.notes || "—"}</td>
++                        <td className="row-actions">
++                          <button
++                            className="btn btn-sm"
++                            onClick={() => setEditing(payment)}
++                          >
++                            تعديل
++                          </button>
++                          <button
++                            className="btn btn-sm btn-danger"
++                            onClick={() => setDeleting(payment)}
++                          >
++                            حذف
++                          </button>
++                        </td>
++                      </tr>
++                    );
++                  })}
++                </tbody>
++              </table>
++            </div>
++          )}
++
++          {filtered.length > visible.length && (
++            <button
++              className="btn show-more"
++              onClick={() => setLimit((l) => l + PAGE_SIZE)}
++            >
++              عرض {PAGE_SIZE} أخرى ({filtered.length - visible.length} متبقي)
++            </button>
++          )}
+         </>
+       )}
+ 
+@@ -176,7 +217,7 @@ function Payments() {
+       {deleting && (
+         <ConfirmDialog
+           title="حذف الدفعة"
+-          message={`متأكد إنك عايز تحذف دفعة ${formatCurrency(deleting.amount)} بتاريخ ${toDateInput(deleting.date)}؟`}
++          message={`متأكدة إنك عايزة تحذفي دفعة ${formatCurrency(deleting.amount)} بتاريخ ${toDateInput(deleting.date)}؟`}
+           busy={deleteBusy}
+           onConfirm={handleDelete}
+           onCancel={() => setDeleting(null)}
+diff --git a/src/services/api.ts b/src/services/api.ts
+index ee2e077..cadc465 100644
+--- a/src/services/api.ts
++++ b/src/services/api.ts
+@@ -1,8 +1,10 @@
+ import type {
++  AllData,
+   Model,
+   NewModelData,
+   NewPaymentData,
+   Payment,
++  Settlement,
+   Summary,
+ } from "../types";
+ 
+@@ -56,6 +58,8 @@ async function post<T>(action: string, payload: object): Promise<T> {
+ }
+ 
+ // ---------- Read ----------
++/** طلب واحد بيجيب الموديلات والدفعات والتسويات (أسرع من 3 طلبات) */
++export const getAll = () => get<AllData>("all");
+ export const getModels = () => get<Model[]>("models");
+ export const getPayments = () => get<Payment[]>("payments");
+ export const getSummary = () => get<Summary>("summary");
+@@ -79,3 +83,10 @@ export const updatePayment = (id: string, data: NewPaymentData) =>
+ 
+ export const deletePayment = (id: string) =>
+   post<{ id: string }>("deletePayment", { id });
++
++// ---------- Settlements ----------
++export const createSettlement = (data: { date: string; notes?: string }) =>
++  post<Settlement>("addSettlement", data);
++
++export const deleteSettlement = (id: string) =>
++  post<{ id: string }>("deleteSettlement", { id });
+diff --git a/src/types/index.ts b/src/types/index.ts
+index a36f7c2..ff5585f 100644
+--- a/src/types/index.ts
++++ b/src/types/index.ts
+@@ -33,3 +33,16 @@ export interface Summary {
+   totalPieces: number;
+   totalFabricCm: number;
+ }
++
++/** تسوية: الحساب اتقفل لحد التاريخ ده، والحساب الجديد بيبدأ من اليوم اللي بعده */
++export interface Settlement {
++  id: string;
++  date: string;
++  notes?: string;
++}
++
++export interface AllData {
++  models: Model[];
++  payments: Payment[];
++  settlements: Settlement[];
++}
+diff --git a/src/utils/calculations.ts b/src/utils/calculations.ts
+index ffd4ef9..10ce055 100644
+--- a/src/utils/calculations.ts
++++ b/src/utils/calculations.ts
+@@ -13,6 +13,8 @@ interface SummaryOptions {
+   startModelId: string;
+   endModelId: string | null;
+   paymentsEndDate: string | null;
++  /** آخر يوم اتسوّى: اللي قبله وفيه مابيتحسبش (null = من غير تسوية) */
++  settledUpTo?: string | null;
+ }
+ 
+ /** الموديلات مترتبة بالتاريخ (نسخة جديدة، والأصلية ما بتتغيرش) */
+@@ -26,9 +28,24 @@ export const sortModelsByDate = (models: Model[]): Model[] =>
+ export function selectPeriod(
+   models: Model[],
+   payments: Payment[],
+-  { startModelId, endModelId, paymentsEndDate }: SummaryOptions,
++  { startModelId, endModelId, paymentsEndDate, settledUpTo = null }: SummaryOptions,
+ ): { periodModels: Model[]; periodPayments: Payment[] } {
+-  const sorted = sortModelsByDate(models);
++  const afterSettlement = (date: string) =>
++    settledUpTo === null || date > settledUpTo;
++
++  const sorted = sortModelsByDate(models).filter((m) => afterSettlement(m.date));
++
++  const eligiblePayments = payments.filter(
++    (p) =>
++      afterSettlement(p.date) &&
++      (paymentsEndDate === null || p.date <= paymentsEndDate),
++  );
++
++  // مفيش موديلات (بعد التسوية مثلًا): الدفعات لوحدها بتتحسب، فالرصيد يبقى سالب
++  if (sorted.length === 0) {
++    return { periodModels: [], periodPayments: eligiblePayments };
++  }
++
+   const startIndex = sorted.findIndex((m) => m.id === startModelId);
+ 
+   const endIndex = endModelId
+@@ -42,26 +59,12 @@ export function selectPeriod(
+   const periodModels = sorted.slice(startIndex, endIndex + 1);
+   const startDate = sorted[startIndex].date;
+ 
+-  const periodPayments = payments.filter(
+-    (p) =>
+-      p.date >= startDate &&
+-      (paymentsEndDate === null || p.date <= paymentsEndDate),
+-  );
++  const periodPayments = eligiblePayments.filter((p) => p.date >= startDate);
+ 
+   return { periodModels, periodPayments };
+ }
+ 
+-export function calculateSummary(
+-  models: Model[],
+-  payments: Payment[],
+-  options: SummaryOptions,
+-): Summary {
+-  const { periodModels, periodPayments } = selectPeriod(
+-    models,
+-    payments,
+-    options,
+-  );
+-
++function summarize(periodModels: Model[], periodPayments: Payment[]): Summary {
+   const totalWork = periodModels.reduce(
+     (sum, model) => sum + model.totalPrice,
+     0,
+@@ -88,6 +91,42 @@ export function calculateSummary(
+   };
+ }
+ 
++export function calculateSummary(
++  models: Model[],
++  payments: Payment[],
++  options: SummaryOptions,
++): Summary {
++  const { periodModels, periodPayments } = selectPeriod(
++    models,
++    payments,
++    options,
++  );
++  return summarize(periodModels, periodPayments);
++}
++
++/** حساب كل اللي بعد `after` ولحد `upTo` (شاملين)، بيستخدم لمعاينة التسوية */
++export function summarizeUpTo(
++  models: Model[],
++  payments: Payment[],
++  after: string | null,
++  upTo: string,
++): Summary {
++  const inRange = (date: string) =>
++    (after === null || date > after) && date <= upTo;
++
++  return summarize(
++    models.filter((m) => inRange(m.date)),
++    payments.filter((p) => inRange(p.date)),
++  );
++}
++
++/** "2026-06" ← "2026-06-30" */
++export function lastDayOfMonth(month: string): string {
++  const [year, monthNumber] = month.split("-").map(Number);
++  // اليوم 0 من الشهر اللي بعده = آخر يوم في الشهر ده
++  return fromUtcMs(Date.UTC(year, monthNumber, 0));
++}
++
+ // ---------------------------------------------------------------- أسبوعي
+ 
+ export interface WeekPoint {
+diff --git a/src/utils/table.ts b/src/utils/table.ts
+new file mode 100644
+index 0000000..36598d1
+--- /dev/null
++++ b/src/utils/table.ts
+@@ -0,0 +1,12 @@
++/** عدد الصفوف اللي بتظهر في الجدول في كل مرة */
++export const PAGE_SIZE = 50;
++
++/** الأحدث فوق: بالتاريخ، ولو نفس اليوم بالأحدث إضافةً (الـ id فيه الوقت) */
++export const compareNewest = (
++  a: { date: string; id: string },
++  b: { date: string; id: string },
++) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id);
++
++/** month بصيغة yyyy-MM، والفاضي معناه "كل الشهور" */
++export const matchesMonth = (date: string, month: string) =>
++  !month || date.slice(0, 7) === month;
+-- 
+2.43.0
+
