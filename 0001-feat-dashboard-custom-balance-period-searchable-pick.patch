@@ -1,0 +1,741 @@
+From 73fb1e65fddd36436fbb728b8a4dce45f40f20ec Mon Sep 17 00:00:00 2001
+From: Habiba <dev@example.com>
+Date: Fri, 2 Oct 2026 09:18:44 +0000
+Subject: [PATCH] feat(dashboard): custom balance period, searchable pickers,
+ month filter, weekly chart
+
+- Dashboard computes summary client-side from models + payments
+- period: start model, end model (default last), payments end (default none)
+- SearchSelect: text search + month/year filter (no day)
+- balance card color: negative=red, positive=blue, zero=green
+- weekly net chart (work - payments), week starts Saturday
+- calculations: selectPeriod, sortModelsByDate, groupByWeek
+- tsconfig: exclude scratch.ts so build passes
+---
+ src/components/SearchSelect.tsx | 102 +++++++++++------
+ src/components/WeeklyChart.tsx  |  74 +++++++++++++
+ src/index.css                   |  61 +++++++++--
+ src/pages/Dashboard.tsx         | 188 +++++++++++++++++++++++++++-----
+ src/utils/calculations.ts       | 106 ++++++++++++++++--
+ tsconfig.app.json               |   3 +-
+ 6 files changed, 456 insertions(+), 78 deletions(-)
+ create mode 100644 src/components/WeeklyChart.tsx
+
+diff --git a/src/components/SearchSelect.tsx b/src/components/SearchSelect.tsx
+index f505aab..9ac7a02 100644
+--- a/src/components/SearchSelect.tsx
++++ b/src/components/SearchSelect.tsx
+@@ -1,16 +1,17 @@
+ import { useState } from "react";
+ 
+-interface SearchSelectItem {
++export interface SearchSelectItem {
+   value: string; // الـ id (داخلي)
+   label: string; // اللي المصنع بيشوفه
++  date?: string; // yyyy-MM-dd (لو موجود بيظهر فلتر الشهر والسنة)
+ }
+ 
+ interface SearchSelectProps {
+   items: SearchSelectItem[];
+-  value: string | null;
++  value: string | null; // الاختيار الحالي
+   onChange: (value: string | null) => void;
+   placeholder?: string;
+-  emptyLabel?: string; // خيار "الافتراضي" اللي بيرجّع null
++  emptyLabel?: string; // نص خيار "الافتراضي" اللي بيرجّع null
+ }
+ 
+ function SearchSelect({
+@@ -21,56 +22,89 @@ function SearchSelect({
+   emptyLabel,
+ }: SearchSelectProps) {
+   const [query, setQuery] = useState("");
++  const [month, setMonth] = useState(""); // yyyy-MM (من غير اليوم)
+   const [isOpen, setIsOpen] = useState(false);
+ 
++  const hasDates = items.some((item) => item.date);
+   const selectedLabel = items.find((item) => item.value === value)?.label ?? "";
+ 
+-  const filteredItems = items.filter((item) =>
+-    item.label.toLowerCase().includes(query.toLowerCase()),
++  const filteredItems = items.filter(
++    (item) =>
++      item.label.toLowerCase().includes(query.toLowerCase()) &&
++      (!month || item.date?.slice(0, 7) === month),
+   );
+ 
++  function close() {
++    setIsOpen(false);
++    setQuery("");
++    setMonth("");
++  }
++
+   function select(newValue: string | null) {
+     onChange(newValue);
+-    setQuery("");
+-    setIsOpen(false);
++    close();
+   }
+ 
+   return (
+-    <div className="search-select">
++    <div
++      className="search-select"
++      onFocus={() => setIsOpen(true)}
++      // بنقفل القايمة بس لما الفوكس يخرج من الـ component كله
++      // (فالضغط على فلتر الشهر جوّاه مايقفلهاش)
++      onBlur={(e) => {
++        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) close();
++      }}
++    >
+       <input
+         type="text"
+         value={isOpen ? query : selectedLabel}
+         placeholder={placeholder}
+-        onFocus={() => setIsOpen(true)}
+         onChange={(e) => setQuery(e.target.value)}
+-        onBlur={() => {
+-          setIsOpen(false);
+-          setQuery("");
+-        }}
+       />
++
+       {isOpen && (
+-        <ul className="dropdown">
+-          {emptyLabel && (
+-            <li
+-              className={value === null ? "selected" : ""}
+-              onMouseDown={() => select(null)}
+-            >
+-              {emptyLabel}
+-            </li>
++        <div className="dropdown">
++          {hasDates && (
++            <div className="dropdown-filter">
++              <label>
++                الشهر والسنة
++                <input
++                  type="month"
++                  value={month}
++                  onChange={(e) => setMonth(e.target.value)}
++                />
++              </label>
++              {month && (
++                <button type="button" onClick={() => setMonth("")}>
++                  كل الشهور
++                </button>
++              )}
++            </div>
+           )}
+-          {filteredItems.map((item) => (
+-            <li
+-              key={item.value}
+-              className={value === item.value ? "selected" : ""}
+-              onMouseDown={() => select(item.value)}
+-            >
+-              {item.label}
+-            </li>
+-          ))}
+-          {filteredItems.length === 0 && (
+-            <li className="empty">لا توجد نتائج</li>
+-          )}
+-        </ul>
++
++          <ul>
++            {emptyLabel && (
++              <li
++                className={value === null ? "selected" : ""}
++                onMouseDown={() => select(null)}
++              >
++                {emptyLabel}
++              </li>
++            )}
++            {filteredItems.map((item) => (
++              <li
++                key={item.value}
++                className={value === item.value ? "selected" : ""}
++                onMouseDown={() => select(item.value)}
++              >
++                {item.label}
++              </li>
++            ))}
++            {filteredItems.length === 0 && (
++              <li className="empty">لا توجد نتائج</li>
++            )}
++          </ul>
++        </div>
+       )}
+     </div>
+   );
+diff --git a/src/components/WeeklyChart.tsx b/src/components/WeeklyChart.tsx
+new file mode 100644
+index 0000000..c1fcd77
+--- /dev/null
++++ b/src/components/WeeklyChart.tsx
+@@ -0,0 +1,74 @@
++import type { WeekPoint } from "../utils/calculations";
++import { formatCurrency, formatNumber } from "../utils/format";
++
++const SLOT = 64; // عرض كل أسبوع
++const BAR = 34; // عرض العمود
++const HEIGHT = 230;
++const TOP = 26;
++const BOTTOM = 40;
++
++// 5500 → 5.5k
++function compact(value: number) {
++  return Math.abs(value) >= 1000
++    ? `${formatNumber(Math.round(value / 100) / 10)}k`
++    : formatNumber(value);
++}
++
++function WeeklyChart({ data }: { data: WeekPoint[] }) {
++  if (data.length === 0) {
++    return <p className="state">لا توجد بيانات كافية للرسم</p>;
++  }
++
++  const max = Math.max(0, ...data.map((d) => d.net));
++  const min = Math.min(0, ...data.map((d) => d.net));
++  const scale = (HEIGHT - TOP - BOTTOM) / (max - min || 1);
++  const zeroY = TOP + max * scale; // خط الصفر
++  const width = data.length * SLOT;
++
++  return (
++    // الرسم بيمشي من الأقدم للأحدث (يسار ← يمين) حتى في الصفحة العربي
++    <div className="chart-scroll" dir="ltr">
++      <svg
++        width={width}
++        height={HEIGHT}
++        viewBox={`0 0 ${width} ${HEIGHT}`}
++        role="img"
++        aria-label="الصافي الأسبوعي: قيمة الشغل ناقص الدفعات"
++      >
++        <line x1={0} x2={width} y1={zeroY} y2={zeroY} className="chart-axis" />
++
++        {data.map((d, i) => {
++          const h = Math.abs(d.net) * scale;
++          const x = i * SLOT + (SLOT - BAR) / 2;
++          const y = d.net >= 0 ? zeroY - h : zeroY;
++          const labelY = d.net >= 0 ? y - 6 : y + h + 14;
++          const tone = d.net > 0 ? "bar-pos" : d.net < 0 ? "bar-neg" : "bar-zero";
++
++          return (
++            <g key={d.weekStart}>
++              <title>
++                {`أسبوع ${d.weekStart}\nالشغل: ${formatCurrency(d.work)}\nالدفعات: ${formatCurrency(d.payments)}\nالصافي: ${formatCurrency(d.net)}`}
++              </title>
++              <rect
++                x={x}
++                y={y}
++                width={BAR}
++                height={d.net === 0 ? 2 : Math.max(h, 2)}
++                rx={4}
++                className={tone}
++              />
++              <text x={i * SLOT + SLOT / 2} y={labelY} textAnchor="middle" className="chart-value">
++                {compact(d.net)}
++              </text>
++              <text x={i * SLOT + SLOT / 2} y={HEIGHT - 10} textAnchor="middle" className="chart-label">
++                {d.weekStart.slice(5)}
++              </text>
++            </g>
++          );
++        })}
++      </svg>
++    </div>
++  );
++}
++
++export default WeeklyChart;
+diff --git a/src/index.css b/src/index.css
+index a31201a..598d6f3 100644
+--- a/src/index.css
++++ b/src/index.css
+@@ -160,14 +160,14 @@ h2 {
+   font-style: normal;
+   font-weight: 700;
+ }
+-.balance-card.owed-factory {
+-  background: var(--good);
++.balance-card.negative {
++  background: var(--danger);
+ }
+-.balance-card.owed-trader {
+-  background: var(--warn);
++.balance-card.positive {
++  background: #1d4ed8;
+ }
+-.balance-card.settled {
+-  background: #577ac4;
++.balance-card.zero {
++  background: var(--good);
+ }
+ .cards {
+   display: grid;
+@@ -337,7 +337,7 @@ tbody tr:last-child td {
+   margin: 0;
+   padding: 4px;
+   list-style: none;
+-  max-height: 240px;
++  max-height: 300px;
+   overflow-y: auto;
+   background: var(--surface);
+   border: 1px solid var(--border);
+@@ -375,3 +375,50 @@ tbody tr:last-child td {
+     border-radius: 16px;
+   }
+ }
++
++.dropdown ul { list-style: none; margin: 0; padding: 0; }
++.dropdown-filter {
++  display: flex;
++  align-items: end;
++  gap: 8px;
++  padding: 6px 6px 8px;
++  border-bottom: 1px solid var(--border);
++  margin-bottom: 4px;
++}
++.dropdown-filter label { display: flex; flex-direction: column; gap: 2px; flex: 1; font-size: 0.8rem; color: var(--muted); }
++.dropdown-filter input { min-height: 38px; padding: 6px 8px; }
++.dropdown-filter button {
++  font: inherit; font-size: 0.85rem; min-height: 38px; padding: 0 10px;
++  border: 1px solid var(--border); border-radius: 8px; background: var(--surface); cursor: pointer;
++}
++
++/* Panels & filters */
++.panel {
++  background: var(--surface);
++  border: 1px solid var(--border);
++  border-radius: var(--radius);
++  padding: 14px;
++  margin-bottom: 14px;
++}
++details.panel > summary { cursor: pointer; font-weight: 700; }
++.filters { display: grid; gap: 12px; margin: 12px 0; }
++.filter-label { display: block; font-weight: 700; font-size: 0.9rem; margin-bottom: 4px; }
++.cards { margin-bottom: 14px; }
++
++/* Weekly chart */
++.chart-scroll { overflow-x: auto; }
++.chart-scroll svg { display: block; margin: 0 auto; }
++.chart-axis { stroke: var(--border); stroke-width: 1; }
++.bar-pos { fill: #1d4ed8; }
++.bar-neg { fill: var(--danger); }
++.bar-zero { fill: var(--muted); }
++.chart-value { font-size: 11px; fill: var(--text); }
++.chart-label { font-size: 11px; fill: var(--muted); }
++.chart-note { color: var(--muted); font-size: 0.85rem; margin: 10px 0 0; }
++.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
++.dot-pos { background: #1d4ed8; }
++.dot-neg { background: var(--danger); }
++
++@media (min-width: 640px) {
++  .filters { grid-template-columns: repeat(3, 1fr); }
++}
+diff --git a/src/pages/Dashboard.tsx b/src/pages/Dashboard.tsx
+index 5032ae6..2f95859 100644
+--- a/src/pages/Dashboard.tsx
++++ b/src/pages/Dashboard.tsx
+@@ -1,25 +1,50 @@
+ import { useEffect, useState } from "react";
+-import { getSummary } from "../services/api";
+-import type { Summary } from "../types";
+-import { formatCurrency, formatMeters, formatNumber } from "../utils/format";
+ import SearchSelect from "../components/SearchSelect";
++import WeeklyChart from "../components/WeeklyChart";
++import { getModels, getPayments } from "../services/api";
++import type { Model, Payment } from "../types";
++import {
++  calculateSummary,
++  groupByWeek,
++  selectPeriod,
++  sortModelsByDate,
++} from "../utils/calculations";
++import {
++  formatCurrency,
++  formatMeters,
++  formatNumber,
++} from "../utils/format";
++
++const WEEKS_SHOWN = 12;
++
++// لو الـ id اللي كنا مختارينه اتحذف، نرجع للافتراضي (null)
++const existing = (id: string | null, list: { id: string }[]) =>
++  id !== null && list.some((item) => item.id === id) ? id : null;
+ 
+ function Dashboard() {
+-  const [summary, setSummary] = useState<Summary | null>(null);
++  const [models, setModels] = useState<Model[]>([]);
++  const [payments, setPayments] = useState<Payment[]>([]);
+   const [loading, setLoading] = useState(true);
+   const [error, setError] = useState("");
+-
+   const [reloadKey, setReloadKey] = useState(0);
+ 
+-  const [picked, setPicked] = useState<string | null>(null);
++  // null = الافتراضي: أول موديل / آخر موديل / من غير نهاية للدفعات
++  const [startModelId, setStartModelId] = useState<string | null>(null);
++  const [endModelId, setEndModelId] = useState<string | null>(null);
++  const [paymentsEndId, setPaymentsEndId] = useState<string | null>(null);
++
+   useEffect(() => {
+     let cancelled = false;
+ 
+     async function run() {
+       try {
+-        const data = await getSummary();
++        const [modelsData, paymentsData] = await Promise.all([
++          getModels(),
++          getPayments(),
++        ]);
+         if (cancelled) return;
+-        setSummary(data);
++        setModels(modelsData);
++        setPayments(paymentsData);
+         setError("");
+       } catch (err) {
+         console.error(err);
+@@ -41,12 +66,30 @@ function Dashboard() {
+     setReloadKey((key) => key + 1);
+   }
+ 
++  // لما البداية تتغير، لو النهاية بقت قبلها نرجّعها للافتراضي
++  function handleStartChange(id: string | null) {
++    setStartModelId(id);
++
++    if (id !== null && endModelId !== null) {
++      const sorted = sortModelsByDate(models);
++      const startIndex = sorted.findIndex((m) => m.id === id);
++      const endIndex = sorted.findIndex((m) => m.id === endModelId);
++      if (endIndex < startIndex) setEndModelId(null);
++    }
++  }
++
++  function resetPeriod() {
++    setStartModelId(null);
++    setEndModelId(null);
++    setPaymentsEndId(null);
++  }
++
+   if (loading) return <p className="state">جاري تحميل الحساب...</p>;
+ 
+-  if (error || !summary) {
++  if (error) {
+     return (
+       <div className="state state-error">
+-        <p>{error || "لا توجد بيانات"}</p>
++        <p>{error}</p>
+         <button className="btn" onClick={retry}>
+           إعادة المحاولة
+         </button>
+@@ -54,12 +97,57 @@ function Dashboard() {
+     );
+   }
+ 
++  // ---------- الحسابات (مش state، بتتحسب من اللي فوق) ----------
++  const sortedModels = sortModelsByDate(models);
++
++  const startId = existing(startModelId, sortedModels);
++  const endId = existing(endModelId, sortedModels);
++  const payEndId = existing(paymentsEndId, payments);
++  const paymentsEndDate = payments.find((p) => p.id === payEndId)?.date ?? null;
++
++  const options = {
++    startModelId: startId ?? sortedModels[0]?.id ?? "",
++    endModelId: endId,
++    paymentsEndDate,
++  };
++
++  const summary = calculateSummary(models, payments, options);
++  const { periodModels, periodPayments } = selectPeriod(
++    models,
++    payments,
++    options,
++  );
++  const weeks = groupByWeek(periodModels, periodPayments).slice(-WEEKS_SHOWN);
++
++  // ---------- قوايم الاختيار (الأحدث فوق) ----------
++  const modelItem = (m: Model) => ({
++    value: m.id,
++    label: `${m.modelName} — ${m.date} — ${formatNumber(m.quantity)} قطعة`,
++    date: m.date,
++  });
++
++  const startItems = [...sortedModels].reverse().map(modelItem);
++
++  // النهاية: من موديل البداية فما بعد بس
++  const startIndex = startId
++    ? sortedModels.findIndex((m) => m.id === startId)
++    : 0;
++  const endItems = sortedModels.slice(startIndex).reverse().map(modelItem);
++
++  const paymentItems = [...payments]
++    .sort((a, b) => b.date.localeCompare(a.date))
++    .map((p) => ({
++      value: p.id,
++      label: `${p.date} — ${formatCurrency(p.amount)}`,
++      date: p.date,
++    }));
++
++  const isCustomPeriod =
++    startId !== null || endId !== null || payEndId !== null;
++
++  // ---------- لون كارت الرصيد ----------
+   const tone =
+-    summary.balance > 0
+-      ? "owed-factory"
+-      : summary.balance < 0
+-        ? "owed-trader"
+-        : "settled";
++    summary.balance > 0 ? "positive" : summary.balance < 0 ? "negative" : "zero";
+   const balanceText =
+     summary.balance > 0
+       ? "مستحق للمصنع"
+@@ -69,28 +157,64 @@ function Dashboard() {
+ 
+   return (
+     <section>
+-      <SearchSelect
+-        items={[
+-          { value: "1", label: "بنطلون — 2026-10-01" },
+-          { value: "2", label: "قميص — 2026-10-05" },
+-        ]}
+-        value={picked}
+-        onChange={setPicked}
+-        placeholder="اختاري موديل"
+-        emptyLabel="آخر موديل (تلقائي)"
+-      />
+-      ;
+       <div className="page-head">
+         <h1>الحسابات</h1>
+         <button className="btn" onClick={retry}>
+           تحديث
+         </button>
+       </div>
++
++      <details className="panel">
++        <summary>
++          فترة الحساب: {isCustomPeriod ? "مخصصة" : "كل الموديلات والدفعات"}
++        </summary>
++
++        <div className="filters">
++          <div>
++            <span className="filter-label">من موديل</span>
++            <SearchSelect
++              items={startItems}
++              value={startId}
++              onChange={handleStartChange}
++              placeholder="ابحثي باسم الموديل"
++              emptyLabel="أول موديل (تلقائي)"
++            />
++          </div>
++          <div>
++            <span className="filter-label">إلى موديل</span>
++            <SearchSelect
++              items={endItems}
++              value={endId}
++              onChange={setEndModelId}
++              placeholder="ابحثي باسم الموديل"
++              emptyLabel="آخر موديل (تلقائي)"
++            />
++          </div>
++          <div>
++            <span className="filter-label">آخر دفعة محسوبة</span>
++            <SearchSelect
++              items={paymentItems}
++              value={payEndId}
++              onChange={setPaymentsEndId}
++              placeholder="ابحثي بالتاريخ أو القيمة"
++              emptyLabel="كل الدفعات (تلقائي)"
++            />
++          </div>
++        </div>
++
++        {isCustomPeriod && (
++          <button className="btn btn-sm" onClick={resetPeriod}>
++            إعادة ضبط الفترة
++          </button>
++        )}
++      </details>
++
+       <div className={`balance-card ${tone}`}>
+         <span>الرصيد الحالي</span>
+         <strong>{formatCurrency(Math.abs(summary.balance))}</strong>
+         <em>{balanceText}</em>
+       </div>
++
+       <div className="cards">
+         <div className="card">
+           <span>إجمالي قيمة الشغل</span>
+@@ -109,6 +233,18 @@ function Dashboard() {
+           <strong>{formatMeters(summary.totalFabricCm)}</strong>
+         </div>
+       </div>
++
++      <div className="panel">
++        <h2>الصافي الأسبوعي</h2>
++        <WeeklyChart data={weeks} />
++        <p className="chart-note">
++          <span className="dot dot-pos" /> أزرق: الشغل أكبر من الدفعات (مستحق
++          للمصنع زاد) · <span className="dot dot-neg" /> أحمر: الدفعات أكبر من
++          الشغل. الصافي = قيمة الشغل − الدفعات في الأسبوع، ومش ربح فعلي لأن
++          تكاليف المصنع مش متسجلة. الأسبوع بيبدأ من السبت، وآخر {WEEKS_SHOWN}{" "}
++          أسبوع داخل الفترة المختارة.
++        </p>
++      </div>
+     </section>
+   );
+ }
+diff --git a/src/utils/calculations.ts b/src/utils/calculations.ts
+index a672dbf..ffd4ef9 100644
+--- a/src/utils/calculations.ts
++++ b/src/utils/calculations.ts
+@@ -15,12 +15,20 @@ interface SummaryOptions {
+   paymentsEndDate: string | null;
+ }
+ 
+-export function calculateSummary(
++/** الموديلات مترتبة بالتاريخ (نسخة جديدة، والأصلية ما بتتغيرش) */
++export const sortModelsByDate = (models: Model[]): Model[] =>
++  [...models].sort((a, b) => a.date.localeCompare(b.date));
++
++/**
++ * بتحدد الموديلات والدفعات اللي داخلة في الفترة المختارة.
++ * لو الاختيار غلط (موديل مش موجود، أو البداية بعد النهاية) بترجّع مصفوفتين فاضيتين.
++ */
++export function selectPeriod(
+   models: Model[],
+   payments: Payment[],
+   { startModelId, endModelId, paymentsEndDate }: SummaryOptions,
+-): Summary {
+-  const sorted = [...models].sort((a, b) => a.date.localeCompare(b.date));
++): { periodModels: Model[]; periodPayments: Payment[] } {
++  const sorted = sortModelsByDate(models);
+   const startIndex = sorted.findIndex((m) => m.id === startModelId);
+ 
+   const endIndex = endModelId
+@@ -28,13 +36,7 @@ export function calculateSummary(
+     : sorted.length - 1;
+ 
+   if (startIndex === -1 || endIndex === -1 || startIndex > endIndex) {
+-    return {
+-      totalWork: 0,
+-      totalPayments: 0,
+-      balance: 0,
+-      totalPieces: 0,
+-      totalFabricCm: 0,
+-    };
++    return { periodModels: [], periodPayments: [] };
+   }
+ 
+   const periodModels = sorted.slice(startIndex, endIndex + 1);
+@@ -46,6 +48,20 @@ export function calculateSummary(
+       (paymentsEndDate === null || p.date <= paymentsEndDate),
+   );
+ 
++  return { periodModels, periodPayments };
++}
++
++export function calculateSummary(
++  models: Model[],
++  payments: Payment[],
++  options: SummaryOptions,
++): Summary {
++  const { periodModels, periodPayments } = selectPeriod(
++    models,
++    payments,
++    options,
++  );
++
+   const totalWork = periodModels.reduce(
+     (sum, model) => sum + model.totalPrice,
+     0,
+@@ -71,3 +87,73 @@ export function calculateSummary(
+     totalFabricCm,
+   };
+ }
++
++// ---------------------------------------------------------------- أسبوعي
++
++export interface WeekPoint {
++  weekStart: string; // yyyy-MM-dd (أول يوم في الأسبوع = السبت)
++  work: number; // قيمة الشغل في الأسبوع
++  payments: number; // الدفعات في الأسبوع
++  net: number; // الصافي = الشغل - الدفعات
++}
++
++const DAY_MS = 86_400_000;
++
++// بنشتغل بـ UTC عشان فرق التوقيت ما يزحزحش اليوم
++const toUtcMs = (date: string) => {
++  const [y, m, d] = date.slice(0, 10).split("-").map(Number);
++  return Date.UTC(y, m - 1, d);
++};
++const fromUtcMs = (ms: number) => new Date(ms).toISOString().slice(0, 10);
++
++/** أول يوم (سبت) في أسبوع التاريخ ده */
++export function weekStart(date: string): string {
++  const ms = toUtcMs(date);
++  const day = new Date(ms).getUTCDay(); // 0=الأحد ... 6=السبت
++  const sinceSaturday = (day + 1) % 7;
++  return fromUtcMs(ms - sinceSaturday * DAY_MS);
++}
++
++/** بتجمّع الموديلات والدفعات في أسابيع (بتملى الأسابيع الفاضية بأصفار) */
++export function groupByWeek(
++  models: Model[],
++  payments: Payment[],
++): WeekPoint[] {
++  const map = new Map<string, { work: number; payments: number }>();
++
++  const bucket = (date: string) => {
++    const key = weekStart(date);
++    let entry = map.get(key);
++    if (!entry) {
++      entry = { work: 0, payments: 0 };
++      map.set(key, entry);
++    }
++    return entry;
++  };
++
++  models.forEach((m) => {
++    bucket(m.date).work += m.totalPrice;
++  });
++  payments.forEach((p) => {
++    bucket(p.date).payments += p.amount;
++  });
++
++  const keys = [...map.keys()].sort();
++  if (keys.length === 0) return [];
++
++  const points: WeekPoint[] = [];
++  const last = toUtcMs(keys[keys.length - 1]);
++
++  for (let t = toUtcMs(keys[0]); t <= last; t += 7 * DAY_MS) {
++    const key = fromUtcMs(t);
++    const entry = map.get(key) ?? { work: 0, payments: 0 };
++    points.push({
++      weekStart: key,
++      work: entry.work,
++      payments: entry.payments,
++      net: entry.work - entry.payments,
++    });
++  }
++
++  return points;
++}
+diff --git a/tsconfig.app.json b/tsconfig.app.json
+index 6830b6f..3cebf42 100644
+--- a/tsconfig.app.json
++++ b/tsconfig.app.json
+@@ -22,5 +22,6 @@
+     "erasableSyntaxOnly": true,
+     "noFallthroughCasesInSwitch": true
+   },
+-  "include": ["src"]
++  "include": ["src"],
++  "exclude": ["src/utils/scratch.ts"]
+ }
+-- 
+2.43.0
+
