@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getSummary } from "../services/api";
 import type { Summary } from "../types";
 import { formatCurrency, formatMeters, formatNumber } from "../utils/format";
+import SearchSelect from "../components/SearchSelect";
 
 function Dashboard() {
   const [summary, setSummary] = useState<Summary | null>(null);
@@ -10,6 +11,7 @@ function Dashboard() {
 
   const [reloadKey, setReloadKey] = useState(0);
 
+  const [picked, setPicked] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
 
@@ -53,7 +55,11 @@ function Dashboard() {
   }
 
   const tone =
-    summary.balance > 0 ? "owed-factory" : summary.balance < 0 ? "owed-trader" : "settled";
+    summary.balance > 0
+      ? "owed-factory"
+      : summary.balance < 0
+        ? "owed-trader"
+        : "settled";
   const balanceText =
     summary.balance > 0
       ? "مستحق للمصنع"
@@ -63,19 +69,28 @@ function Dashboard() {
 
   return (
     <section>
+      <SearchSelect
+        items={[
+          { value: "1", label: "بنطلون — 2026-10-01" },
+          { value: "2", label: "قميص — 2026-10-05" },
+        ]}
+        value={picked}
+        onChange={setPicked}
+        placeholder="اختاري موديل"
+        emptyLabel="آخر موديل (تلقائي)"
+      />
+      ;
       <div className="page-head">
         <h1>الحسابات</h1>
         <button className="btn" onClick={retry}>
           تحديث
         </button>
       </div>
-
       <div className={`balance-card ${tone}`}>
         <span>الرصيد الحالي</span>
         <strong>{formatCurrency(Math.abs(summary.balance))}</strong>
         <em>{balanceText}</em>
       </div>
-
       <div className="cards">
         <div className="card">
           <span>إجمالي قيمة الشغل</span>
