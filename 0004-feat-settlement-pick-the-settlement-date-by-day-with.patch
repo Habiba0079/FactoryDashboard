@@ -1,0 +1,157 @@
+From addb5a0145e0382a8f196afdc1605f9c03afe81a Mon Sep 17 00:00:00 2001
+From: Habiba <dev@example.com>
+Date: Mon, 5 Oct 2026 18:53:57 +0000
+Subject: [PATCH] feat(settlement): pick the settlement date by day, with
+ warnings
+
+- date input (day/month/year) instead of month only
+- warn when the settlement covers all existing data or is in the future
+- confirm button shows the date being settled
+---
+ src/components/SettlementModal.tsx | 56 +++++++++++++++++++-----------
+ src/utils/calculations.ts          |  9 +++++
+ 2 files changed, 45 insertions(+), 20 deletions(-)
+
+diff --git a/src/components/SettlementModal.tsx b/src/components/SettlementModal.tsx
+index fadd1b5..b3dfee7 100644
+--- a/src/components/SettlementModal.tsx
++++ b/src/components/SettlementModal.tsx
+@@ -3,8 +3,8 @@ import Field from "./Field";
+ import Modal from "./Modal";
+ import { createSettlement } from "../services/api";
+ import type { Model, Payment, Settlement } from "../types";
+-import { lastDayOfMonth, summarizeUpTo } from "../utils/calculations";
+-import { formatCurrency, formatNumber } from "../utils/format";
++import { hasDataAfter, summarizeUpTo } from "../utils/calculations";
++import { formatCurrency, formatNumber, today } from "../utils/format";
+ 
+ interface SettlementModalProps {
+   models: Model[];
+@@ -21,29 +21,32 @@ function SettlementModal({
+   onClose,
+   onCreated,
+ }: SettlementModalProps) {
+-  const [month, setMonth] = useState("");
++  const [date, setDate] = useState(""); // yyyy-MM-dd (يوم وشهر وسنة)
+   const [notes, setNotes] = useState("");
+   const [saving, setSaving] = useState(false);
+   const [error, setError] = useState("");
+ 
+-  const upTo = month ? lastDayOfMonth(month) : "";
+   const tooEarly =
+-    upTo !== "" && lastSettlementDate !== null && upTo <= lastSettlementDate;
++    date !== "" && lastSettlementDate !== null && date <= lastSettlementDate;
+ 
+   // معاينة: الرصيد اللي هيتقفل بالتسوية دي
+   const preview =
+-    upTo && !tooEarly
+-      ? summarizeUpTo(models, payments, lastSettlementDate, upTo)
++    date && !tooEarly
++      ? summarizeUpTo(models, payments, lastSettlementDate, date)
+       : null;
+ 
++  // تحذيرات تمنع التسوية بالغلط
++  const coversEverything = preview !== null && !hasDataAfter(models, payments, date);
++  const inFuture = date !== "" && date > today();
++
+   async function handleConfirm() {
+-    if (!upTo) return setError("اختاري الشهر الأول");
+-    if (tooEarly) return setError("الشهر ده قبل آخر تسوية أو نفس شهرها");
++    if (!date) return setError("اختاري التاريخ الأول");
++    if (tooEarly) return setError("التاريخ ده قبل آخر تسوية أو نفس يومها");
+ 
+     try {
+       setSaving(true);
+       setError("");
+-      const created = await createSettlement({ date: upTo, notes: notes.trim() });
++      const created = await createSettlement({ date, notes: notes.trim() });
+       onCreated(created);
+     } catch (err) {
+       console.error(err);
+@@ -55,17 +58,17 @@ function SettlementModal({
+   return (
+     <Modal title="تسوية الحساب" onClose={onClose}>
+       <p className="muted">
+-        التسوية بتقفل الحساب لحد آخر يوم في الشهر اللي تختاريه. الحساب الجديد
+-        بيبدأ من اليوم اللي بعده، وكل اللي قبل كده بيفضل موجود في الجداول بس
+-        مش بيتحسب.
++        التسوية بتقفل الحساب لحد اليوم اللي تختاريه (شامل اليوم ده). الحساب
++        الجديد بيبدأ من اليوم اللي بعده، وكل اللي قبل كده بيفضل موجود في
++        الجداول بس مش بيتحسب. وتقدري تلغي التسوية بعدين من "سجل التسويات".
+       </p>
+ 
+       <Field
+-        label="تسوية لحد نهاية شهر"
+-        type="month"
+-        value={month}
+-        onChange={(e) => setMonth(e.target.value)}
+-        error={tooEarly ? "الشهر ده قبل آخر تسوية أو نفس شهرها" : undefined}
++        label="تسوية لحد يوم"
++        type="date"
++        value={date}
++        onChange={(e) => setDate(e.target.value)}
++        error={tooEarly ? "التاريخ ده قبل آخر تسوية أو نفس يومها" : undefined}
+       />
+       <Field
+         label="ملاحظات (اختياري)"
+@@ -77,7 +80,7 @@ function SettlementModal({
+       {preview && (
+         <div className="settle-preview">
+           <div>
+-            لحد <strong>{upTo}</strong>
++            لحد <strong>{date}</strong>
+           </div>
+           <div>
+             الشغل: {formatCurrency(preview.totalWork)} — الدفعات:{" "}
+@@ -95,6 +98,19 @@ function SettlementModal({
+                   : "(متسوي)"}
+             </strong>
+           </div>
++          {coversEverything && (
++            <div className="form-error">
++              انتبهي: التسوية دي بتغطي <strong>كل</strong> الموديلات والدفعات
++              الموجودة، فالداشبورد هيبقى صفر لحد ما تضيفي بيانات بعد التاريخ
++              ده. لو ده مش المقصود، اختاري تاريخ أبكر.
++            </div>
++          )}
++          {inFuture && (
++            <div className="form-error">
++              التاريخ ده في المستقبل، وأي موديل أو دفعة تضيفيها قبله
++              مش هتتحسب.
++            </div>
++          )}
+           {preview.balance !== 0 && (
+             <div className="form-error">
+               انتبهي: الرصيد ده مش هيتنقل للحساب الجديد. لو لسه ما اتسددش
+@@ -112,7 +128,7 @@ function SettlementModal({
+           onClick={handleConfirm}
+           disabled={saving || !preview}
+         >
+-          {saving ? "جاري التسجيل..." : "تأكيد التسوية"}
++          {saving ? "جاري التسجيل..." : date ? `تأكيد التسوية لحد ${date}` : "تأكيد التسوية"}
+         </button>
+         <button className="btn" onClick={onClose} disabled={saving}>
+           إلغاء
+diff --git a/src/utils/calculations.ts b/src/utils/calculations.ts
+index 10ce055..af7c05f 100644
+--- a/src/utils/calculations.ts
++++ b/src/utils/calculations.ts
+@@ -120,6 +120,15 @@ export function summarizeUpTo(
+   );
+ }
+ 
++/** هل فيه موديل أو دفعة بعد التاريخ ده؟ (لتحذير التسوية اللي بتغطي كل حاجة) */
++export function hasDataAfter(
++  models: Model[],
++  payments: Payment[],
++  date: string,
++): boolean {
++  return models.some((m) => m.date > date) || payments.some((p) => p.date > date);
++}
++
+ /** "2026-06" ← "2026-06-30" */
+ export function lastDayOfMonth(month: string): string {
+   const [year, monthNumber] = month.split("-").map(Number);
+-- 
+2.43.0
+
