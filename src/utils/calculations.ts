@@ -120,6 +120,15 @@ export function summarizeUpTo(
   );
 }
 
+/** هل فيه موديل أو دفعة بعد التاريخ ده؟ (لتحذير التسوية اللي بتغطي كل حاجة) */
+export function hasDataAfter(
+  models: Model[],
+  payments: Payment[],
+  date: string,
+): boolean {
+  return models.some((m) => m.date > date) || payments.some((p) => p.date > date);
+}
+
 /** "2026-06" ← "2026-06-30" */
 export function lastDayOfMonth(month: string): string {
   const [year, monthNumber] = month.split("-").map(Number);
