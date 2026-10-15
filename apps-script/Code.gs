@@ -348,10 +348,16 @@ function canonicalHeader(header) {
 }
 
 function getHeaders(sheet) {
-  return sheet
+  const headers = sheet
     .getRange(1, 1, 1, sheet.getLastColumn())
     .getValues()[0]
     .map(canonicalHeader);
+
+  // أول عمود دايمًا هو الـ id. لو اسمه اتغيّر بالغلط في الشيت (مثلًا ";l")
+  // مانسيبش الحساب يبوظ بصمت.
+  headers[0] = "id";
+
+  return headers;
 }
 
 function getSheet(name) {
@@ -384,6 +390,7 @@ function readRows(name) {
   }
 
   const headers = data[0].map(canonicalHeader);
+  headers[0] = "id"; // نفس الحماية: أول عمود هو الـ id
   const rows = data.slice(1);
 
   return rows

@@ -122,6 +122,10 @@ function Dashboard() {
     );
   }
 
+  // صفوف من غير id معناها إن عنوان العمود الأول في الشيت اتغيّر
+  const missingIds =
+    models.some((m) => !m.id) || payments.some((p) => !p.id);
+
   // Calculated values (derived from the state above).
   const startId = existing(startModelId, sortedModels);
   const endId = existing(endModelId, sortedModels);
@@ -192,6 +196,13 @@ function Dashboard() {
         <p className="form-error">تعذر التحديث، بنعرض آخر بيانات محفوظة.</p>
       )}
       {actionError && <p className="form-error">{actionError}</p>}
+      {missingIds && (
+        <p className="form-error">
+          فيه صفوف في الشيت من غير ID، فالأرقام ممكن تبان صفر. غالبًا عنوان
+          العمود الأول (A1) في تاب Models أو Payments اتغيّر بالغلط. لازم
+          يتكتب <strong>ID</strong>، وبعدها اضغطي "تحديث".
+        </p>
+      )}
 
       <div className="settle-bar">
         <NeedleIcon size={20} />

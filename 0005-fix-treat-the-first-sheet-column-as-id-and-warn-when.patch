@@ -1,0 +1,75 @@
+From 04141790cafee6c3dfdae627aa66b90a9989d7d1 Mon Sep 17 00:00:00 2001
+From: Habiba <dev@example.com>
+Date: Thu, 15 Oct 2026 18:18:14 +0000
+Subject: [PATCH] fix: treat the first sheet column as id and warn when rows
+ have no id
+
+- Apps Script: first column is always the id, even if its header was edited by mistake (e.g. ";l")
+- Dashboard: show a clear warning instead of silently showing zeros
+---
+ apps-script/Code.gs     |  9 ++++++++-
+ src/pages/Dashboard.tsx | 11 +++++++++++
+ 2 files changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/apps-script/Code.gs b/apps-script/Code.gs
+index ea5d912..5c3fb40 100644
+--- a/apps-script/Code.gs
++++ b/apps-script/Code.gs
+@@ -348,10 +348,16 @@ function canonicalHeader(header) {
+ }
+ 
+ function getHeaders(sheet) {
+-  return sheet
++  const headers = sheet
+     .getRange(1, 1, 1, sheet.getLastColumn())
+     .getValues()[0]
+     .map(canonicalHeader);
++
++  // أول عمود دايمًا هو الـ id. لو اسمه اتغيّر بالغلط في الشيت (مثلًا ";l")
++  // مانسيبش الحساب يبوظ بصمت.
++  headers[0] = "id";
++
++  return headers;
+ }
+ 
+ function getSheet(name) {
+@@ -385,6 +391,7 @@ function readRows(name) {
+   }
+ 
+   const headers = data[0].map(canonicalHeader);
++  headers[0] = "id"; // نفس الحماية: أول عمود هو الـ id
+   const rows = data.slice(1);
+ 
+   return rows
+diff --git a/src/pages/Dashboard.tsx b/src/pages/Dashboard.tsx
+index 92dfdd6..77d2067 100644
+--- a/src/pages/Dashboard.tsx
++++ b/src/pages/Dashboard.tsx
+@@ -122,6 +122,10 @@ function Dashboard() {
+     );
+   }
+ 
++  // صفوف من غير id معناها إن عنوان العمود الأول في الشيت اتغيّر
++  const missingIds =
++    models.some((m) => !m.id) || payments.some((p) => !p.id);
++
+   // ---------- الحسابات (مش state، بتتحسب من اللي فوق) ----------
+   const startId = existing(startModelId, sortedModels);
+   const endId = existing(endModelId, sortedModels);
+@@ -193,6 +197,13 @@ function Dashboard() {
+         <p className="form-error">تعذر التحديث، بنعرض آخر بيانات محفوظة.</p>
+       )}
+       {actionError && <p className="form-error">{actionError}</p>}
++      {missingIds && (
++        <p className="form-error">
++          فيه صفوف في الشيت من غير ID، فالأرقام ممكن تبان صفر. غالبًا عنوان
++          العمود الأول (A1) في تاب Models أو Payments اتغيّر بالغلط. لازم
++          يتكتب <strong>ID</strong>، وبعدها اضغطي "تحديث".
++        </p>
++      )}
+ 
+       <div className="settle-bar">
+         <NeedleIcon size={20} />
+-- 
+2.43.0
+
