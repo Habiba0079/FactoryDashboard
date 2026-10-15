@@ -9,15 +9,15 @@ export interface DataContextValue {
   setModels: Dispatch<SetStateAction<Model[]>>;
   setPayments: Dispatch<SetStateAction<Payment[]>>;
   setSettlements: Dispatch<SetStateAction<Settlement[]>>;
-  /** عندنا بيانات نعرضها (من الجهاز أو من النت) */
+  /** Whether cached or remote data is available to display. */
   hasData: boolean;
-  /** أول تحميل ومفيش حاجة محفوظة نعرضها */
+  /** Whether the initial load is in progress and no cached data is available. */
   loading: boolean;
-  /** بنحدّث في الخلفية */
+  /** Whether data is being refreshed in the background. */
   refreshing: boolean;
   error: string;
   refresh: () => void;
-  /** تاريخ آخر تسوية، أو null */
+  /** Date of the latest settlement, or null if none exists. */
   lastSettlementDate: string | null;
 }
 

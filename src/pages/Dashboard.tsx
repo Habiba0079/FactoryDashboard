@@ -23,7 +23,7 @@ import { formatCurrency, formatNumber } from "../utils/format";
 
 const WEEKS_SHOWN = 7;
 
-// لو الـ id اللي كنا مختارينه اتحذف، نرجع للافتراضي (null)
+// Reset to the default selection (null) if the selected ID has been deleted.
 const existing = (id: string | null, list: { id: string }[]) =>
   id !== null && list.some((item) => item.id === id) ? id : null;
 
@@ -41,12 +41,12 @@ function Dashboard() {
     lastSettlementDate,
   } = useData();
 
-  // null = الافتراضي: أول موديل / آخر موديل / من غير نهاية للدفعات
+  // null selects the defaults: first model, last model, and no payment end date.
   const [startModelId, setStartModelId] = useState<string | null>(null);
   const [endModelId, setEndModelId] = useState<string | null>(null);
   const [paymentsEndId, setPaymentsEndId] = useState<string | null>(null);
 
-  // عرض الحساب من الأول (تجاهل آخر تسوية)
+  // Show the full account history, ignoring the latest settlement.
   const [ignoreSettlement, setIgnoreSettlement] = useState(false);
   const [settleOpen, setSettleOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -57,7 +57,7 @@ function Dashboard() {
 
   const settledUpTo = ignoreSettlement ? null : lastSettlementDate;
 
-  // الموديلات والدفعات اللي لسه بتتحسب (بعد آخر تسوية)
+  // Models and payments included in the current account period.
   const sortedModels = sortModelsByDate(models).filter(
     (m) => settledUpTo === null || m.date > settledUpTo,
   );
@@ -71,7 +71,7 @@ function Dashboard() {
     setPaymentsEndId(null);
   }
 
-  // لما البداية تتغير، لو النهاية بقت قبلها نرجّعها للافتراضي
+  // Reset the end selection if it precedes the new start selection.
   function handleStartChange(id: string | null) {
     setStartModelId(id);
 
@@ -122,7 +122,7 @@ function Dashboard() {
     );
   }
 
-  // ---------- الحسابات (مش state، بتتحسب من اللي فوق) ----------
+  // Calculated values (derived from the state above).
   const startId = existing(startModelId, sortedModels);
   const endId = existing(endModelId, sortedModels);
   const payEndId = existing(paymentsEndId, eligiblePayments);
@@ -144,7 +144,7 @@ function Dashboard() {
   );
   const weeks = groupByWeek(periodModels, periodPayments).slice(-WEEKS_SHOWN);
 
-  // ---------- قوايم الاختيار (الأحدث فوق) ----------
+  // Selection lists, with the newest entries first.
   const modelItem = (m: Model) => ({
     value: m.id,
     label: `${m.modelName} — ${m.date} — ${formatNumber(m.quantity)} قطعة`,
@@ -153,7 +153,7 @@ function Dashboard() {
 
   const startItems = [...sortedModels].reverse().map(modelItem);
 
-  // النهاية: من موديل البداية فما بعد بس
+  // End options include only models at or after the selected start.
   const startIndex = startId
     ? sortedModels.findIndex((m) => m.id === startId)
     : 0;
@@ -170,7 +170,6 @@ function Dashboard() {
   const isCustomPeriod =
     startId !== null || endId !== null || payEndId !== null;
 
-  // ---------- لون كارت الرصيد ----------
   const tone =
     summary.balance > 0 ? "positive" : summary.balance < 0 ? "negative" : "zero";
   const balanceText =

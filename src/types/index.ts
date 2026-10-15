@@ -34,7 +34,7 @@ export interface Summary {
   totalFabricCm: number;
 }
 
-/** تسوية: الحساب اتقفل لحد التاريخ ده، والحساب الجديد بيبدأ من اليوم اللي بعده */
+/** A settlement closes the account through its date; the next period starts the following day. */
 export interface Settlement {
   id: string;
   date: string;

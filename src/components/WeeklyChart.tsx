@@ -1,13 +1,12 @@
 import type { WeekPoint } from "../utils/calculations";
 import { formatCurrency, formatNumber } from "../utils/format";
 
-const SLOT = 64; // عرض كل أسبوع
-const BAR = 34; // عرض العمود
+const SLOT = 64;
+const BAR = 34;
 const HEIGHT = 230;
 const TOP = 26;
 const BOTTOM = 40;
 
-// 5500 → 5.5k
 function compact(value: number) {
   return Math.abs(value) >= 1000
     ? `${formatNumber(Math.round(value / 100) / 10)}k`
@@ -22,11 +21,11 @@ function WeeklyChart({ data }: { data: WeekPoint[] }) {
   const max = Math.max(0, ...data.map((d) => d.net));
   const min = Math.min(0, ...data.map((d) => d.net));
   const scale = (HEIGHT - TOP - BOTTOM) / (max - min || 1);
-  const zeroY = TOP + max * scale; // خط الصفر
+  const zeroY = TOP + max * scale; // Y-coordinate of the zero line.
   const width = data.length * SLOT;
 
   return (
-    // الرسم بيمشي من الأقدم للأحدث (يسار ← يمين) حتى في الصفحة العربي
+    // Keep the chart chronological from left to right, including in RTL layouts.
     <div className="chart-scroll" dir="ltr">
       <svg
         width={width}

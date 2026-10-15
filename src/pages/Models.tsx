@@ -26,7 +26,7 @@ function Models() {
     lastSettlementDate,
   } = useData();
 
-  // "new" = إضافة، Model = تعديل، null = الفورم مقفول
+  // "new" opens the create form, a Model opens the edit form, and null closes the form.
   const [editing, setEditing] = useState<Model | "new" | null>(null);
   const [deleting, setDeleting] = useState<Model | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
@@ -36,7 +36,7 @@ function Models() {
   const [month, setMonth] = useState("");
   const [limit, setLimit] = useState(PAGE_SIZE);
 
-  // الأحدث فوق + الفلتر
+  // Sort newest first and apply the active filter.
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
     return [...models]
@@ -48,7 +48,7 @@ function Models() {
       );
   }, [models, search, month]);
 
-  // الإجماليات على كل نتايج الفلتر (مش على أول ٥٠ بس)
+  // Calculate totals from all filtered results, not only the first 50 rows.
   const totals = useMemo(
     () => ({
       pieces: filtered.reduce((sum, m) => sum + m.quantity, 0),

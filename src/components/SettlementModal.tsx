@@ -21,7 +21,7 @@ function SettlementModal({
   onClose,
   onCreated,
 }: SettlementModalProps) {
-  const [date, setDate] = useState(""); // yyyy-MM-dd (يوم وشهر وسنة)
+  const [date, setDate] = useState(""); // yyyy-MM-dd.
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -29,13 +29,12 @@ function SettlementModal({
   const tooEarly =
     date !== "" && lastSettlementDate !== null && date <= lastSettlementDate;
 
-  // معاينة: الرصيد اللي هيتقفل بالتسوية دي
+  // Preview the balance that this settlement will close.
   const preview =
     date && !tooEarly
       ? summarizeUpTo(models, payments, lastSettlementDate, date)
       : null;
 
-  // تحذيرات تمنع التسوية بالغلط
   const coversEverything = preview !== null && !hasDataAfter(models, payments, date);
   const inFuture = date !== "" && date > today();
 

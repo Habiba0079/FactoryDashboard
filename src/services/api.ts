@@ -11,7 +11,6 @@ import type {
 const API_URL = import.meta.env.VITE_API_URL as string;
 const API_TOKEN = (import.meta.env.VITE_API_TOKEN as string | undefined) ?? "";
 
-/** القراءة: GET */
 async function get<T>(action: string): Promise<T> {
   const response = await fetch(`${API_URL}?action=${action}`, {
     cache: "no-store",
@@ -21,7 +20,7 @@ async function get<T>(action: string): Promise<T> {
 
   const result = await response.json();
 
-  // الـ Apps Script بيرجّع { success:false, message } عند الأخطاء
+  // Apps Script returns { success: false, message } when a request fails.
   if (result && typeof result === "object" && result.success === false) {
     throw new Error(result.message || `Failed to fetch ${action}`);
   }
@@ -30,10 +29,9 @@ async function get<T>(action: string): Promise<T> {
 }
 
 /**
- * الكتابة: بنبعتها GET مع الـ token.
- * (جربنا POST، بس رد الـ Apps Script بعد الـ redirect كان بيوصل غلط
- *  فالتطبيق كان بيظهر خطأ رغم إن الصف بيتسجل في الشيت.)
- * الـ fetch هنا مايتكررش لوحده، و cache: "no-store" بيمنع الكاش.
+ * Send writes using GET with the API token. Apps Script POST responses were
+ * unreliable after redirects, sometimes reporting an error even when the
+ * spreadsheet row had been saved. Disable caching and do not retry automatically.
  */
 async function post<T>(action: string, payload: object): Promise<T> {
   const params = new URLSearchParams({ action, token: API_TOKEN });
@@ -58,7 +56,7 @@ async function post<T>(action: string, payload: object): Promise<T> {
 }
 
 // ---------- Read ----------
-/** طلب واحد بيجيب الموديلات والدفعات والتسويات (أسرع من 3 طلبات) */
+/** Fetch models, payments, and settlements in one request. */
 export const getAll = () => get<AllData>("all");
 export const getModels = () => get<Model[]>("models");
 export const getPayments = () => get<Payment[]>("payments");

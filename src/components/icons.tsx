@@ -21,7 +21,6 @@ function Icon({ size = 22, children, ...props }: IconProps) {
   );
 }
 
-/** مقص */
 export const ScissorsIcon = (props: IconProps) => (
   <Icon {...props}>
     <circle cx="6.5" cy="18" r="2.8" />
@@ -30,7 +29,6 @@ export const ScissorsIcon = (props: IconProps) => (
   </Icon>
 );
 
-/** بكرة خيط */
 export const SpoolIcon = (props: IconProps) => (
   <Icon {...props}>
     <rect x="5" y="3" width="14" height="3" rx="1" />
@@ -39,7 +37,6 @@ export const SpoolIcon = (props: IconProps) => (
   </Icon>
 );
 
-/** مانيكان */
 export const MannequinIcon = (props: IconProps) => (
   <Icon {...props}>
     <path d="M12 2.5v2.2" />
@@ -48,7 +45,6 @@ export const MannequinIcon = (props: IconProps) => (
   </Icon>
 );
 
-/** فلوس */
 export const CashIcon = (props: IconProps) => (
   <Icon {...props}>
     <rect x="3" y="6.5" width="18" height="11" rx="2" />
@@ -57,7 +53,6 @@ export const CashIcon = (props: IconProps) => (
   </Icon>
 );
 
-/** إبرة وخيط (للتسوية) */
 export const NeedleIcon = (props: IconProps) => (
   <Icon {...props}>
     <path d="M19.5 3.5 6 17" />

@@ -1,17 +1,17 @@
 import { useState } from "react";
 
 export interface SearchSelectItem {
-  value: string; // الـ id (داخلي)
-  label: string; // اللي المصنع بيشوفه
-  date?: string; // yyyy-MM-dd (لو موجود بيظهر فلتر الشهر والسنة)
+  value: string;
+  label: string;
+  date?: string; // yyyy-MM-dd; enables month and year filtering when present.
 }
 
 interface SearchSelectProps {
   items: SearchSelectItem[];
-  value: string | null; // الاختيار الحالي
+  value: string | null;
   onChange: (value: string | null) => void;
   placeholder?: string;
-  emptyLabel?: string; // نص خيار "الافتراضي" اللي بيرجّع null
+  emptyLabel?: string;
 }
 
 function SearchSelect({
@@ -22,7 +22,7 @@ function SearchSelect({
   emptyLabel,
 }: SearchSelectProps) {
   const [query, setQuery] = useState("");
-  const [month, setMonth] = useState(""); // yyyy-MM (من غير اليوم)
+  const [month, setMonth] = useState(""); // yyyy-MM, without a day.
   const [isOpen, setIsOpen] = useState(false);
 
   const hasDates = items.some((item) => item.date);
@@ -49,8 +49,8 @@ function SearchSelect({
     <div
       className="search-select"
       onFocus={() => setIsOpen(true)}
-      // بنقفل القايمة بس لما الفوكس يخرج من الـ component كله
-      // (فالضغط على فلتر الشهر جوّاه مايقفلهاش)
+      // Close the menu only when focus leaves the entire component, so interacting
+      // with the month filter does not close it.
       onBlur={(e) => {
         if (!e.currentTarget.contains(e.relatedTarget as Node | null)) close();
       }}

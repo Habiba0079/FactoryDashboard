@@ -423,9 +423,9 @@ details.panel > summary { cursor: pointer; font-weight: 700; }
   .filters { grid-template-columns: repeat(3, 1fr); }
 }
 
-/* ===== ستايل مصنع الملابس ===== */
+/* Garment factory theme */
 
-/* هيدر بغرزة (خط متقطع زي الخياطة) */
+/* Stitched header divider */
 .app-header {
   display: flex;
   align-items: center;
@@ -434,7 +434,7 @@ details.panel > summary { cursor: pointer; font-weight: 700; }
   border-bottom: 3px dashed rgba(255, 255, 255, 0.55);
 }
 
-/* التابس بأيقونات */
+/* Icon tabs */
 .tab {
   display: flex;
   flex-direction: column;
@@ -444,7 +444,7 @@ details.panel > summary { cursor: pointer; font-weight: 700; }
   font-size: 0.8rem;
 }
 
-/* كارت الرصيد بإطار متقطع كأنه مخيّط */
+/* Balance card with a stitched border */
 .balance-card {
   position: relative;
   outline: 2px dashed rgba(255, 255, 255, 0.55);
@@ -456,7 +456,7 @@ details.panel > summary { cursor: pointer; font-weight: 700; }
 
 .state svg { display: block; margin: 0 auto 8px; color: var(--primary); opacity: 0.6; }
 
-/* شريط التسوية */
+/* Settlement bar */
 .settle-bar {
   display: flex;
   flex-wrap: wrap;
@@ -495,7 +495,7 @@ details.panel > summary { cursor: pointer; font-weight: 700; }
 }
 .history small { display: block; color: var(--muted); }
 
-/* فلتر الجداول */
+/* Table filters */
 .table-filters {
   display: flex;
   flex-wrap: wrap;
@@ -516,7 +516,7 @@ details.panel > summary { cursor: pointer; font-weight: 700; }
 .table-filters label { display: flex; flex-direction: column; gap: 2px; font-size: 0.8rem; color: var(--muted); }
 .filter-count { color: var(--muted); font-size: 0.85rem; margin-inline-start: auto; }
 
-/* صفوف اللي اتسوّت */
+/* Settled rows */
 .row-settled td { color: var(--muted); background: #f8faf9; }
 .badge {
   display: inline-block;

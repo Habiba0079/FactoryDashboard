@@ -22,7 +22,6 @@ const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
 function App() {
   const [tab, setTab] = useState<Tab>("dashboard");
 
-  // البيانات في DataProvider، فالتنقل بين الصفحات فوري ومابيحمّلش من جديد
   return (
     <DataProvider>
       <div className="app">

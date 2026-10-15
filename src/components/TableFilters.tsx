@@ -1,11 +1,11 @@
 interface TableFiltersProps {
   search: string;
   onSearch: (value: string) => void;
-  month: string; // yyyy-MM أو فاضي
+  month: string; // yyyy-MM, or empty for all months.
   onMonth: (value: string) => void;
   placeholder: string;
-  shown: number; // عدد الصفوف بعد الفلتر
-  total: number; // العدد الكلي
+  shown: number;
+  total: number;
 }
 
 function TableFilters({

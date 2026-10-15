@@ -13,17 +13,18 @@ interface SummaryOptions {
   startModelId: string;
   endModelId: string | null;
   paymentsEndDate: string | null;
-  /** آخر يوم اتسوّى: اللي قبله وفيه مابيتحسبش (null = من غير تسوية) */
+  /** Last settled date; earlier dates are excluded. Null means no settlement. */
   settledUpTo?: string | null;
 }
 
-/** الموديلات مترتبة بالتاريخ (نسخة جديدة، والأصلية ما بتتغيرش) */
+/** Sort models by date without mutating the original array. */
 export const sortModelsByDate = (models: Model[]): Model[] =>
   [...models].sort((a, b) => a.date.localeCompare(b.date));
 
 /**
- * بتحدد الموديلات والدفعات اللي داخلة في الفترة المختارة.
- * لو الاختيار غلط (موديل مش موجود، أو البداية بعد النهاية) بترجّع مصفوفتين فاضيتين.
+ * Select the models and payments included in the chosen period.
+ * Returns empty arrays for an invalid selection, such as a missing model or
+ * a start model that follows the end model.
  */
 export function selectPeriod(
   models: Model[],
@@ -41,7 +42,7 @@ export function selectPeriod(
       (paymentsEndDate === null || p.date <= paymentsEndDate),
   );
 
-  // مفيش موديلات (بعد التسوية مثلًا): الدفعات لوحدها بتتحسب، فالرصيد يبقى سالب
+  // If no models remain (for example, after a settlement), payments alone produce a negative balance.
   if (sorted.length === 0) {
     return { periodModels: [], periodPayments: eligiblePayments };
   }
@@ -104,7 +105,7 @@ export function calculateSummary(
   return summarize(periodModels, periodPayments);
 }
 
-/** حساب كل اللي بعد `after` ولحد `upTo` (شاملين)، بيستخدم لمعاينة التسوية */
+/** Summarize records after `after` through `upTo`, inclusive, for settlement previews. */
 export function summarizeUpTo(
   models: Model[],
   payments: Payment[],
@@ -120,7 +121,7 @@ export function summarizeUpTo(
   );
 }
 
-/** هل فيه موديل أو دفعة بعد التاريخ ده؟ (لتحذير التسوية اللي بتغطي كل حاجة) */
+/** Check whether any model or payment exists after the given date. */
 export function hasDataAfter(
   models: Model[],
   payments: Payment[],
@@ -129,40 +130,40 @@ export function hasDataAfter(
   return models.some((m) => m.date > date) || payments.some((p) => p.date > date);
 }
 
-/** "2026-06" ← "2026-06-30" */
+/** Convert a yyyy-MM month string to the month's final yyyy-MM-dd date. */
 export function lastDayOfMonth(month: string): string {
   const [year, monthNumber] = month.split("-").map(Number);
-  // اليوم 0 من الشهر اللي بعده = آخر يوم في الشهر ده
+  // Day zero of the following month is the final day of this month.
   return fromUtcMs(Date.UTC(year, monthNumber, 0));
 }
 
-// ---------------------------------------------------------------- أسبوعي
+// Weekly calculations.
 
 export interface WeekPoint {
-  weekStart: string; // yyyy-MM-dd (أول يوم في الأسبوع = السبت)
-  work: number; // قيمة الشغل في الأسبوع
-  payments: number; // الدفعات في الأسبوع
-  net: number; // الصافي = الشغل - الدفعات
+  weekStart: string; // yyyy-MM-dd; weeks start on Saturday.
+  work: number; // Total work value for the week.
+  payments: number; // Total payments for the week.
+  net: number; // Net amount: work minus payments.
 }
 
 const DAY_MS = 86_400_000;
 
-// بنشتغل بـ UTC عشان فرق التوقيت ما يزحزحش اليوم
+// Use UTC to prevent time-zone offsets from shifting the date.
 const toUtcMs = (date: string) => {
   const [y, m, d] = date.slice(0, 10).split("-").map(Number);
   return Date.UTC(y, m - 1, d);
 };
 const fromUtcMs = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 
-/** أول يوم (سبت) في أسبوع التاريخ ده */
+/** Return the Saturday that starts the week containing the given date. */
 export function weekStart(date: string): string {
   const ms = toUtcMs(date);
-  const day = new Date(ms).getUTCDay(); // 0=الأحد ... 6=السبت
+  const day = new Date(ms).getUTCDay(); // 0 = Sunday, 6 = Saturday.
   const sinceSaturday = (day + 1) % 7;
   return fromUtcMs(ms - sinceSaturday * DAY_MS);
 }
 
-/** بتجمّع الموديلات والدفعات في أسابيع (بتملى الأسابيع الفاضية بأصفار) */
+/** Group models and payments by week, filling empty weeks with zero values. */
 export function groupByWeek(
   models: Model[],
   payments: Payment[],

@@ -1,13 +1,13 @@
 const SPREADSHEET_ID = SpreadsheetApp.getActiveSpreadsheet().getId();
 
 /* ============================================================
- * الـ API
- * القراءة : GET  ?action=models | payments | summary
- * الكتابة : GET ?action=addModel&token=...&date=...  (أو POST بـ JSON)
+ * API
+ * Read: GET ?action=models | payments | summary
+ * Write: GET ?action=addModel&token=...&date=... (or POST with JSON)
  *   addModel / updateModel / deleteModel
  *   addPayment / updatePayment / deletePayment
  *
- * الـ token (اختياري لكن مُوصى به):
+ * API token (optional but recommended):
  *   Project Settings → Script properties → API_TOKEN
  * ============================================================ */
 
@@ -41,7 +41,7 @@ function doGet(e) {
     return jsonResponse(readRows("Settlements"));
   }
 
-  // طلب واحد بيجيب كل البيانات (أسرع من 3 طلبات منفصلة)
+  // Fetch all data in one request instead of making three separate requests.
   if (action === "all") {
     return jsonResponse({
       models: readRows("Models"),
@@ -50,8 +50,8 @@ function doGet(e) {
     });
   }
 
-  // الكتابة: بتتقبل بس لو الـ token صح (شوفي handleWrite).
-  // بنستخدم GET لأن رد الـ POST في Apps Script بيوصل غلط للمتصفح عندنا.
+  // Writes are accepted only when the token is valid; see handleWrite.
+  // Use GET because Apps Script POST responses are not handled correctly by the browser.
   if (WRITE_ACTIONS.indexOf(action) !== -1) {
     return handleWrite(e.parameter);
   }
@@ -62,7 +62,7 @@ function doGet(e) {
   });
 }
 
-/* ---------------------------------------------------------- القراءة */
+/* Read operations */
 
 function getModels() {
   return jsonResponse(readRows("Models"));
@@ -109,7 +109,7 @@ function jsonResponse(data) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-/* ---------------------------------------------------------- الكتابة */
+/* Write operations */
 
 function doPost(e) {
   try {
@@ -119,14 +119,14 @@ function doPost(e) {
   }
 }
 
-// منطق الكتابة المشترك (GET و POST): token + lock + تنفيذ الـ action
+// Shared GET/POST write handling: token validation, locking, and action dispatch.
 function handleWrite(body) {
   const lock = LockService.getScriptLock();
 
   try {
     lock.waitLock(10000);
 
-    // لو API_TOKEN متضبط في Script properties لازم يطابق اللي جاي من التطبيق
+    // If API_TOKEN is configured in Script Properties, it must match the application token.
     const expected = PropertiesService
       .getScriptProperties()
       .getProperty("API_TOKEN");
@@ -162,9 +162,9 @@ function handleWrite(body) {
   }
 }
 
-/* ---------------------------------------------------------- Models */
+/* Models */
 
-// تحقق + حسابات الإجماليات (مكان واحد للإضافة والتعديل)
+// Validate model data and calculate totals for both create and update operations.
 function buildModel(data) {
   const modelName = String(data.modelName || "").trim();
   const date = String(data.date || "").slice(0, 10);
@@ -229,7 +229,7 @@ function updateModel(data) {
   return jsonResponse({ success: true, data: model });
 }
 
-/* ---------------------------------------------------------- Payments */
+/* Payments */
 
 function buildPayment(data) {
   const amount = Number(data.amount);
@@ -279,9 +279,9 @@ function updatePayment(data) {
   return jsonResponse({ success: true, data: payment });
 }
 
-/* ---------------------------------------------------------- Settlements */
+/* Settlements */
 
-// تسوية = "الحساب اتقفل لحد التاريخ ده"، والتطبيق بيبدأ يحسب من اليوم اللي بعده
+// A settlement closes the account through its date; calculations resume the following day.
 function addSettlement(data) {
   const date = String(data.date || "").slice(0, 10);
   const notes = String(data.notes || "").trim();
@@ -300,14 +300,14 @@ function addSettlement(data) {
   return jsonResponse({ success: true, data: settlement });
 }
 
-/* ---------------------------------------------------------- Helpers */
+/* Helpers */
 
-// شيت التسويات بيتعمل لوحده أول مرة لو مش موجود
+// Create the Settlements sheet on demand when it does not exist.
 const SHEET_HEADERS = {
   Settlements: ["id", "date", "notes"],
 };
 
-// بنفتح الشيت وبنجيب التوقيت مرة واحدة بس في كل طلب (كانت بتتكرر مع كل صف)
+// Reuse the spreadsheet and its time zone throughout each request.
 let cachedSpreadsheet = null;
 let cachedTimeZone = null;
 
@@ -325,8 +325,8 @@ function getTimeZone() {
   return cachedTimeZone;
 }
 
-// الشيت عندك أسماء أعمدته (ID, Model, TotalFabric...) مختلفة عن اللي التطبيق بيفهمه،
-// فبنترجمها هنا. الحروف الكبيرة والصغيرة والمسافات مابتفرقش.
+// Map spreadsheet column names (such as ID, Model, and TotalFabric) to application fields.
+// Matching ignores capitalization and spaces.
 const HEADER_ALIASES = {
   id: "id",
   date: "date",
@@ -366,8 +366,7 @@ function getSheet(name) {
   return sheet;
 }
 
-// الشيت بيحول التواريخ لـ Date، و JSON.stringify بيحولها UTC،
-// وده بيطلّع التاريخ يوم قبل (توقيت مصر +2/+3). فبنرجّعها yyyy-MM-dd بتوقيت الشيت.
+// Format spreadsheet dates in the sheet's time zone to avoid UTC date shifts.
 function normalizeValue(value) {
   if (value instanceof Date) {
     return Utilities.formatDate(value, getTimeZone(), "yyyy-MM-dd");
@@ -400,7 +399,7 @@ function readRows(name) {
     });
 }
 
-// بنكتب حسب أسماء الأعمدة في الصف الأول، فترتيب الأعمدة مايفرقش
+// Match values to column headers so the column order does not matter.
 function rowFromHeaders(headers, item) {
   return headers.map(header =>
     item[header] === undefined ? "" : item[header]
@@ -414,7 +413,7 @@ function appendRowByHeaders(name, item) {
   sheet.appendRow(rowFromHeaders(headers, item));
 }
 
-// بندوّر على الصف بالـ id (مش برقم الصف) عشان الحذف مايبوظش الباقي
+// Find records by ID rather than row position, which can change after deletions.
 function findRowById(sheet, id) {
   const lastRow = sheet.getLastRow();
 

@@ -7,7 +7,7 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      // أي نسخة جديدة بتتنزل لوحدها من غير ما المستخدم يعمل حاجة
+      // Automatically activate new application versions.
       registerType: 'autoUpdate',
       includeAssets: ['favicon.svg', 'apple-touch-icon.png'],
       manifest: {
@@ -30,8 +30,7 @@ export default defineConfig({
         ],
       },
       workbox: {
-        // بنخزّن شكل التطبيق (ملفات الموقع) بس.
-        // طلبات الـ Apps Script (script.google.com) بتروح للنت دايمًا ومابتتخزنش.
+        // Cache only application assets; requests to Apps Script must always reach the network.
         globPatterns: ['**/*.{js,css,html,svg,png,webmanifest}'],
         navigateFallback: '/index.html',
         cleanupOutdatedCaches: true,

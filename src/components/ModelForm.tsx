@@ -11,7 +11,7 @@ interface ModelFormProps {
   onCancel: () => void;
 }
 
-// الحقول بتتخزن كنص عشان المستخدم يقدر يمسح الرقم ويكتب من جديد براحته
+// Keep fields as strings so users can clear and re-enter numeric values while editing.
 interface FormState {
   date: string;
   modelName: string;

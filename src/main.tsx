@@ -10,10 +10,10 @@ createRoot(document.getElementById("root")!).render(
   </StrictMode>
 );
 
-// تسجيل الـ service worker (بيشتغل في النسخة المنشورة بس)
+// Register the service worker in production builds only.
 registerSW({ immediate: true });
 
-// تنظيف كاش الـ service worker القديم اللي كان مكتوب باليد
+// Remove caches created by the previous manually maintained service worker.
 if ("caches" in window) {
   void caches.delete("factory-accounts-v1");
   void caches.delete("factory-accounts-v2");
