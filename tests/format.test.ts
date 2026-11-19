@@ -6,7 +6,7 @@ import {
   formatNumber,
   toDateInput,
   today,
-} from "./format";
+} from "../src/utils/format";
 
 describe("number formatting", () => {
   it.each([

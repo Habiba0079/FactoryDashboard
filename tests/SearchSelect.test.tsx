@@ -2,8 +2,8 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
-import SearchSelect from "./SearchSelect";
-import type { SearchSelectItem } from "./SearchSelect";
+import SearchSelect from "../src/components/SearchSelect";
+import type { SearchSelectItem } from "../src/components/SearchSelect";
 
 const items: SearchSelectItem[] = [
   { value: "1", label: "بنطلون جينز — 2026-09-10", date: "2026-09-10" },

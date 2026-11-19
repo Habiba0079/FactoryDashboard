@@ -1,11 +1,11 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { makeModel } from "../test/factories";
-import type { NewModelData } from "../types";
-import { findDuplicateModel } from "../utils/duplicates";
-import { today } from "../utils/format";
-import ModelForm from "./ModelForm";
+import { makeModel } from "./factories";
+import type { NewModelData } from "../src/types";
+import { findDuplicateModel } from "../src/utils/duplicates";
+import { today } from "../src/utils/format";
+import ModelForm from "../src/components/ModelForm";
 
 type User = ReturnType<typeof userEvent.setup>;
 

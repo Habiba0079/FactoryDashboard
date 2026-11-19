@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { makeModel, makePayment } from "../test/factories";
-import type { NewModelData, NewPaymentData } from "../types";
-import { findDuplicateModel, findDuplicatePayment } from "./duplicates";
+import { makeModel, makePayment } from "./factories";
+import type { NewModelData, NewPaymentData } from "../src/types";
+import { findDuplicateModel, findDuplicatePayment } from "../src/utils/duplicates";
 
 const newModel = (overrides: Partial<NewModelData> = {}): NewModelData => ({
   date: "2026-10-01",

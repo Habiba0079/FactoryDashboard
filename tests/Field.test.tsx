@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import Field from "./Field";
+import Field from "../src/components/Field";
 
 describe("Field", () => {
   it("links the label to its input when a name is given", () => {

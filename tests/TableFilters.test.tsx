@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import TableFilters from "./TableFilters";
+import TableFilters from "../src/components/TableFilters";
 
 const setup = (props: Partial<Parameters<typeof TableFilters>[0]> = {}) => {
   const onSearch = vi.fn();

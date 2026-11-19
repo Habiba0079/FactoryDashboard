@@ -1,10 +1,10 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { makePayment } from "../test/factories";
-import type { NewPaymentData } from "../types";
-import { findDuplicatePayment } from "../utils/duplicates";
-import PaymentForm from "./PaymentForm";
+import { makePayment } from "./factories";
+import type { NewPaymentData } from "../src/types";
+import { findDuplicatePayment } from "../src/utils/duplicates";
+import PaymentForm from "../src/components/PaymentForm";
 
 type User = ReturnType<typeof userEvent.setup>;
 

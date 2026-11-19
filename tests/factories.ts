@@ -1,4 +1,4 @@
-import type { Model, Payment } from "../types";
+import type { Model, Payment } from "../src/types";
 
 let counter = 0;
 

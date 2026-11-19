@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { NewModelData, NewPaymentData } from "../types";
-import { hasErrors, validateModel, validatePayment } from "./validation";
+import type { NewModelData, NewPaymentData } from "../src/types";
+import { hasErrors, validateModel, validatePayment } from "../src/utils/validation";
 
 const validModel: NewModelData = {
   date: "2026-10-01",

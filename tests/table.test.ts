@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compareNewest, matchesMonth } from "./table";
+import { compareNewest, matchesMonth } from "../src/utils/table";
 
 describe("compareNewest", () => {
   it("puts the newest date first", () => {

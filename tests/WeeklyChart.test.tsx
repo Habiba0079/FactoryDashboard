@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import type { WeekPoint } from "../utils/calculations";
-import WeeklyChart from "./WeeklyChart";
+import type { WeekPoint } from "../src/utils/calculations";
+import WeeklyChart from "../src/components/WeeklyChart";
 
 const weeks: WeekPoint[] = [
   { weekStart: "2026-09-26", work: 3000, payments: 3000, net: 0 },

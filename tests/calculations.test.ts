@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { makeModel, makePayment } from "../test/factories";
+import { makeModel, makePayment } from "./factories";
 import {
   calculateBalance,
   calculateSummary,
@@ -12,7 +12,7 @@ import {
   sortModelsByDate,
   summarizeUpTo,
   weekStart,
-} from "./calculations";
+} from "../src/utils/calculations";
 
 describe("simple totals", () => {
   it("calculateTotalPrice multiplies quantity by price per piece", () => {

@@ -1,11 +1,11 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { makeModel, makePayment } from "../test/factories";
-import { createSettlement } from "../services/api";
-import SettlementModal from "./SettlementModal";
+import { makeModel, makePayment } from "./factories";
+import { createSettlement } from "../src/services/api";
+import SettlementModal from "../src/components/SettlementModal";
 
-vi.mock("../services/api", () => ({ createSettlement: vi.fn() }));
+vi.mock("../src/services/api", () => ({ createSettlement: vi.fn() }));
 
 const models = [
   makeModel({ date: "2026-06-25", quantity: 10, totalPrice: 1000 }),
