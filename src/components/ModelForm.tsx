@@ -3,12 +3,14 @@ import Field from "./Field";
 import type { Model, NewModelData } from "../types";
 import { hasErrors, validateModel } from "../utils/validation";
 import type { Errors } from "../utils/validation";
-import { toDateInput, today } from "../utils/format";
+import { formatNumber, toDateInput, today } from "../utils/format";
 
 interface ModelFormProps {
   initial?: Model;
   onSubmit: (data: NewModelData) => Promise<void>;
   onCancel: () => void;
+  /** Returns an existing model that looks like a double entry of `data`, if any. */
+  findDuplicate?: (data: NewModelData) => Model | null;
 }
 
 // Keep fields as strings so users can clear and re-enter numeric values while editing.
@@ -20,7 +22,7 @@ interface FormState {
   fabricCm: string;
 }
 
-function ModelForm({ initial, onSubmit, onCancel }: ModelFormProps) {
+function ModelForm({ initial, onSubmit, onCancel, findDuplicate }: ModelFormProps) {
   const [form, setForm] = useState<FormState>({
     date: initial ? toDateInput(initial.date) : today(),
     modelName: initial?.modelName ?? "",
@@ -31,11 +33,14 @@ function ModelForm({ initial, onSubmit, onCancel }: ModelFormProps) {
   const [errors, setErrors] = useState<Errors<NewModelData>>({});
   const [submitError, setSubmitError] = useState("");
   const [saving, setSaving] = useState(false);
+  // Set after the first save attempt finds a possible double entry; saving again confirms it.
+  const [duplicate, setDuplicate] = useState<Model | null>(null);
 
   function handleChange(event: React.ChangeEvent<HTMLInputElement>) {
     const { name, value } = event.target;
     setForm((previous) => ({ ...previous, [name]: value }));
     setErrors((previous) => ({ ...previous, [name]: undefined }));
+    setDuplicate(null);
   }
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -52,6 +57,14 @@ function ModelForm({ initial, onSubmit, onCancel }: ModelFormProps) {
     const found = validateModel(data);
     setErrors(found);
     if (hasErrors(found)) return;
+
+    if (findDuplicate && duplicate === null) {
+      const existing = findDuplicate(data);
+      if (existing) {
+        setDuplicate(existing);
+        return;
+      }
+    }
 
     try {
       setSaving(true);
@@ -110,11 +123,24 @@ function ModelForm({ initial, onSubmit, onCancel }: ModelFormProps) {
         error={errors.fabricCm}
       />
 
+      {duplicate && (
+        <p className="form-warning">
+          فيه موديل بنفس البيانات متسجل بالفعل ({toDateInput(duplicate.date)} —{" "}
+          {duplicate.modelName} — {formatNumber(duplicate.quantity)} قطعة). لو
+          ده مقصود اضغطي "احفظ برضه"، ولو لأ اضغطي "إلغاء".
+        </p>
+      )}
       {submitError && <p className="form-error">{submitError}</p>}
 
       <div className="actions">
         <button type="submit" className="btn btn-primary" disabled={saving}>
-          {saving ? "جاري الحفظ..." : initial ? "حفظ التعديل" : "إضافة الموديل"}
+          {saving
+            ? "جاري الحفظ..."
+            : duplicate
+              ? "احفظ برضه"
+              : initial
+                ? "حفظ التعديل"
+                : "إضافة الموديل"}
         </button>
         <button type="button" className="btn" onClick={onCancel} disabled={saving}>
           إلغاء

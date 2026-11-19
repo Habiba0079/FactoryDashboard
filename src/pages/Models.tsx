@@ -7,6 +7,7 @@ import TableFilters from "../components/TableFilters";
 import { useData } from "../data/useData";
 import { createModel, deleteModel, updateModel } from "../services/api";
 import type { Model, NewModelData } from "../types";
+import { findDuplicateModel } from "../utils/duplicates";
 import {
   formatCurrency,
   formatMeters,
@@ -225,6 +226,13 @@ function Models() {
             initial={editing === "new" ? undefined : editing}
             onSubmit={handleSave}
             onCancel={() => setEditing(null)}
+            findDuplicate={(data) =>
+              findDuplicateModel(
+                models,
+                data,
+                editing === "new" ? undefined : editing.id,
+              )
+            }
           />
         </Modal>
       )}

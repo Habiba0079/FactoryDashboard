@@ -11,6 +11,7 @@ import {
   updatePayment,
 } from "../services/api";
 import type { NewPaymentData, Payment } from "../types";
+import { findDuplicatePayment } from "../utils/duplicates";
 import { formatCurrency, toDateInput } from "../utils/format";
 import { PAGE_SIZE, compareNewest, matchesMonth } from "../utils/table";
 
@@ -210,6 +211,13 @@ function Payments() {
             initial={editing === "new" ? undefined : editing}
             onSubmit={handleSave}
             onCancel={() => setEditing(null)}
+            findDuplicate={(data) =>
+              findDuplicatePayment(
+                payments,
+                data,
+                editing === "new" ? undefined : editing.id,
+              )
+            }
           />
         </Modal>
       )}

@@ -3,12 +3,14 @@ import Field from "./Field";
 import type { NewPaymentData, Payment } from "../types";
 import { hasErrors, validatePayment } from "../utils/validation";
 import type { Errors } from "../utils/validation";
-import { toDateInput, today } from "../utils/format";
+import { formatCurrency, toDateInput, today } from "../utils/format";
 
 interface PaymentFormProps {
   initial?: Payment;
   onSubmit: (data: NewPaymentData) => Promise<void>;
   onCancel: () => void;
+  /** Returns an existing payment that looks like a double entry of `data`, if any. */
+  findDuplicate?: (data: NewPaymentData) => Payment | null;
 }
 
 interface FormState {
@@ -17,7 +19,7 @@ interface FormState {
   notes: string;
 }
 
-function PaymentForm({ initial, onSubmit, onCancel }: PaymentFormProps) {
+function PaymentForm({ initial, onSubmit, onCancel, findDuplicate }: PaymentFormProps) {
   const [form, setForm] = useState<FormState>({
     date: initial ? toDateInput(initial.date) : today(),
     amount: initial ? String(initial.amount) : "",
@@ -26,11 +28,14 @@ function PaymentForm({ initial, onSubmit, onCancel }: PaymentFormProps) {
   const [errors, setErrors] = useState<Errors<NewPaymentData>>({});
   const [submitError, setSubmitError] = useState("");
   const [saving, setSaving] = useState(false);
+  // Set after the first save attempt finds a possible double entry; saving again confirms it.
+  const [duplicate, setDuplicate] = useState<Payment | null>(null);
 
   function handleChange(event: React.ChangeEvent<HTMLInputElement>) {
     const { name, value } = event.target;
     setForm((previous) => ({ ...previous, [name]: value }));
     setErrors((previous) => ({ ...previous, [name]: undefined }));
+    setDuplicate(null);
   }
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -45,6 +50,14 @@ function PaymentForm({ initial, onSubmit, onCancel }: PaymentFormProps) {
     const found = validatePayment(data);
     setErrors(found);
     if (hasErrors(found)) return;
+
+    if (findDuplicate && duplicate === null) {
+      const existing = findDuplicate(data);
+      if (existing) {
+        setDuplicate(existing);
+        return;
+      }
+    }
 
     try {
       setSaving(true);
@@ -84,11 +97,24 @@ function PaymentForm({ initial, onSubmit, onCancel }: PaymentFormProps) {
         onChange={handleChange}
       />
 
+      {duplicate && (
+        <p className="form-warning">
+          فيه دفعة بنفس البيانات متسجلة بالفعل ({toDateInput(duplicate.date)} —{" "}
+          {formatCurrency(duplicate.amount)}). لو ده مقصود اضغطي "احفظ برضه"،
+          ولو لأ اضغطي "إلغاء".
+        </p>
+      )}
       {submitError && <p className="form-error">{submitError}</p>}
 
       <div className="actions">
         <button type="submit" className="btn btn-primary" disabled={saving}>
-          {saving ? "جاري الحفظ..." : initial ? "حفظ التعديل" : "تسجيل الدفعة"}
+          {saving
+            ? "جاري الحفظ..."
+            : duplicate
+              ? "احفظ برضه"
+              : initial
+                ? "حفظ التعديل"
+                : "تسجيل الدفعة"}
         </button>
         <button type="button" className="btn" onClick={onCancel} disabled={saving}>
           إلغاء

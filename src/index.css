@@ -529,3 +529,11 @@ details.panel > summary { cursor: pointer; font-weight: 700; }
 }
 
 .show-more { display: block; width: 100%; margin-top: 12px; }
+
+/* Warning (not an error): possible duplicate entry */
+.form-warning {
+  background: #fff4d6;
+  color: #7a4b00;
+  border-radius: 8px;
+  padding: 8px 12px;
+}
