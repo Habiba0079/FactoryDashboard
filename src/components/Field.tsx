@@ -1,3 +1,4 @@
+import { useId } from "react";
 import type { InputHTMLAttributes } from "react";
 
 interface FieldProps extends InputHTMLAttributes<HTMLInputElement> {
@@ -6,7 +7,9 @@ interface FieldProps extends InputHTMLAttributes<HTMLInputElement> {
 }
 
 function Field({ label, error, id, name, ...rest }: FieldProps) {
-  const inputId = id ?? name;
+  // Fall back to a generated id so the label is always linked to its input.
+  const generatedId = useId();
+  const inputId = id ?? name ?? generatedId;
 
   return (
     <div className="field">
